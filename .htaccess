@@ -1,0 +1,25 @@
+# =============================================================================
+# Proteções do servidor Apache (Laragon, XAMPP, cPanel)
+# =============================================================================
+
+# Listagem de pastas: não usamos "Options -Indexes" porque hospedagens como a
+# InfinityFree retornam erro 500 com diretivas Options (e já desativam a listagem).
+
+DirectoryIndex index.php index.html
+
+# Bloqueia arquivos ocultos (.env, .htaccess, .gitignore...), documentação,
+# scripts de banco e arquivos PHP que são apenas incluídos por outros.
+<FilesMatch "(^\.|\.(sql|md|txt|ps1|rules|log|ini|lock|example|json)$|^(auth|config|estoque|schema|router)\.php$)">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order allow,deny
+        Deny from all
+    </IfModule>
+</FilesMatch>
+
+# (X-Frame-Options e X-Content-Type-Options são enviados pelas próprias páginas PHP)
+<IfModule mod_headers.c>
+    Header always set Referrer-Policy "same-origin"
+</IfModule>

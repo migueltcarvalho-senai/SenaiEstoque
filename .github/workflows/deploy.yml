@@ -1,36 +1,79 @@
+# =============================================================================
+# Deploy automático na InfinityFree via FTP a cada push na branch main.
+#
+# Configure em: GitHub > Settings > Secrets and variables > Actions > New repository secret
+#   FTP_SERVER    ex.: ftpupload.net               (painel InfinityFree > FTP Details)
+#   FTP_USERNAME  ex.: if0_12345678
+#   FTP_PASSWORD  senha da conta de hospedagem
+#   DB_HOST       ex.: sql123.infinityfree.com     (painel > MySQL Databases)
+#   DB_NAME       ex.: if0_12345678_estoque
+#   DB_USER       ex.: if0_12345678
+#   DB_PASS       senha da conta de hospedagem
+#
+# O arquivo .env é gerado aqui a partir dos Secrets: as senhas nunca ficam no repositório.
+# =============================================================================
 name: Deploy via FTP
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-infinityfree
+  cancel-in-progress: false
 
 jobs:
   deploy:
-    name: Publicar no servidor
     runs-on: ubuntu-latest
-
     steps:
-      - name: Baixar o código do repositório
+      - name: Baixar o código
         uses: actions/checkout@v4
 
-      - name: Substituir variaveis de ambiente no config.php
+      - name: Gerar .env a partir dos Secrets
+        env:
+          FTP_SERVER: ${{ secrets.FTP_SERVER }}
+          FTP_USERNAME: ${{ secrets.FTP_USERNAME }}
+          FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
+          DB_HOST: ${{ secrets.DB_HOST }}
+          DB_NAME: ${{ secrets.DB_NAME }}
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_PASS: ${{ secrets.DB_PASS }}
         run: |
-          sed -i "s/__DB_HOST__/${{ secrets.DB_HOST }}/g" config.php
-          sed -i "s/__DB_NAME__/${{ secrets.DB_NAME }}/g" config.php
-          sed -i "s/__DB_USER__/${{ secrets.DB_USER }}/g" config.php
-          sed -i "s/__DB_PASS__/${{ secrets.DB_PASS }}/g" config.php
+          missing=0
+          for v in FTP_SERVER FTP_USERNAME FTP_PASSWORD DB_HOST DB_NAME DB_USER DB_PASS; do
+            if [ -z "${!v}" ]; then echo "::error::Secret $v não configurado no GitHub"; missing=1; fi
+          done
+          [ "$missing" -eq 0 ] || exit 1
+          {
+            echo "# Gerado automaticamente pelo GitHub Actions - não editar no servidor"
+            echo "DB_HOST=\"${DB_HOST}\""
+            echo "DB_PORT=\"3306\""
+            echo "DB_NAME=\"${DB_NAME}\""
+            echo "DB_USER=\"${DB_USER}\""
+            echo "DB_PASS=\"${DB_PASS}\""
+            echo "APP_TIMEZONE=\"America/Sao_Paulo\""
+          } > .env
 
-      - name: Publicar via FTP
+      - name: Enviar para a InfinityFree (FTP)
         uses: SamKirkland/FTP-Deploy-Action@v4.3.5
         with:
           server: ${{ secrets.FTP_SERVER }}
           username: ${{ secrets.FTP_USERNAME }}
           password: ${{ secrets.FTP_PASSWORD }}
-          local-dir: ./
+          protocol: ftp
+          port: 21
           server-dir: /htdocs/
+          # Só os arquivos que o site precisa; documentação e ferramentas locais ficam de fora
           exclude: |
             **/.git*
             **/.git*/**
-            **/.github/**
-            **/database/**
+            .github/**
+            .agents/**
+            .env.example
+            *.md
+            *.txt
+            *.sql
+            *.ps1
+            *.rules
+            router.php

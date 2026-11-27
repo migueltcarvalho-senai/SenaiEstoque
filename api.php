@@ -1,311 +1,218 @@
 <?php
 /**
- * API RESTful JSON para Persistência no MySQL
+ * API RESTful JSON
  * Sistema de Gestão de Estoque e Endereçamento 2D - SENAI
+ *
+ * - Todas as ações (exceto "health") exigem sessão autenticada.
+ * - Ações de escrita exigem POST + cabeçalho X-CSRF-Token.
+ * - Cada escrita é uma operação de negócio validada no servidor (estoque.php)
+ *   e devolve o estado atualizado, que o cliente apenas exibe.
  */
 
-require_once __DIR__ . '/config.php';
+require_once __DIR__ . '/estoque.php';
 
 header('Content-Type: application/json; charset=utf-8');
+header('Cache-Control: no-store');
+header('X-Content-Type-Options: nosniff');
 
-$action = $_GET['action'] ?? ($_POST['action'] ?? 'get_all');
-$pdo = getDbConnection();
+// Ações somente leitura (GET)
+const READ_ACTIONS = ['health', 'get_all', 'me', 'list_users'];
+
+// Operações de estoque: ação => [função, somente admin?]
+const STOCK_OPERATIONS = [
+    'product_save'       => ['opProductSave', false],
+    'product_delete'     => ['opProductDelete', true],
+    'stock_allocate'     => ['opAllocate', false],
+    'stock_withdraw'     => ['opWithdraw', false],
+    'stock_transfer'     => ['opTransfer', false],
+    'slot_clear'         => ['opSlotClear', false],
+    'expiry_update'      => ['opExpiryUpdate', false],
+    'quick_adjust'       => ['opQuickAdjust', false],
+    'import_items'       => ['opImportItems', false], // modo "substituir" é verificado dentro da operação
+    'custom_slot_add'    => ['opCustomSlotAdd', true],
+    'custom_slot_remove' => ['opCustomSlotRemove', true],
+    'slots_reset_all'    => ['opSlotsResetAll', true],
+    'backup_restore'     => ['opBackupRestore', true],
+    'clear_history'      => ['opClearHistory', true],
+    'reset_all'          => ['opResetAll', true],
+];
+
+// Ações de usuários restritas ao administrador
+const ADMIN_USER_ACTIONS = ['list_users', 'create_user', 'update_user', 'reset_password'];
+
+$action = (string)($_GET['action'] ?? 'get_all');
+$method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
 
 try {
+    try {
+        $pdo = getDbConnection();
+    } catch (PDOException $e) {
+        error_log('[senai-estoque] Falha de conexão MySQL: ' . $e->getMessage());
+        throw new AppException('Falha ao conectar no banco de dados MySQL. Verifique se o MySQL está ligado e as credenciais no arquivo .env.', 503);
+    }
+
+    if ($action === 'health') {
+        respond(['success' => true, 'status' => 'online']);
+    }
+
+    $isRead = in_array($action, READ_ACTIONS, true);
+    if ($isRead !== ($method === 'GET')) {
+        throw new AppException('Método não permitido.', 405);
+    }
+
+    $user = currentUser();
+    if (!$user) {
+        throw new AppException('Sua sessão expirou. Faça login novamente.', 401);
+    }
+    if (!$isRead && !isValidCsrf($_SERVER['HTTP_X_CSRF_TOKEN'] ?? null)) {
+        throw new AppException('Token de segurança inválido. Recarregue a página e tente novamente.', 403);
+    }
+    if ($user['mustChangePassword'] && !in_array($action, ['me', 'change_password'], true)) {
+        throw new AppException('Troque sua senha temporária antes de continuar.', 403);
+    }
+    $adminOnly = in_array($action, ADMIN_USER_ACTIONS, true) || (STOCK_OPERATIONS[$action][1] ?? false);
+    if ($adminOnly && !isAdmin($user)) {
+        throw new AppException('Ação permitida somente para administradores.', 403);
+    }
+
+    // Libera o lock da sessão cedo para não travar requisições paralelas.
+    // A troca de senha ainda precisa da sessão aberta para regenerar o ID.
+    if ($action !== 'change_password') {
+        session_write_close();
+    }
+
+    $input = $isRead ? [] : readJsonBody();
+
+    if (isset(STOCK_OPERATIONS[$action])) {
+        $fn = STOCK_OPERATIONS[$action][0];
+        $message = $fn($pdo, $user, $input);
+        respond(['success' => true, 'message' => $message, 'data' => buildState($pdo)]);
+    }
+
     switch ($action) {
-        case 'health':
-            echo json_encode(['success' => true, 'status' => 'online', 'database' => DB_NAME]);
-            break;
-
         case 'get_all':
-            handleGetAll($pdo);
+            respond(['success' => true, 'data' => buildState($pdo)]);
             break;
-
-        case 'save_state':
-            handleSaveState($pdo);
+        case 'me':
+            respond(['success' => true, 'user' => $user]);
             break;
-
-        case 'reset_all':
-            handleResetAll($pdo);
+        case 'change_password':
+            changeOwnPassword($pdo, $user['id'], (string)($input['currentPassword'] ?? ''), (string)($input['newPassword'] ?? ''));
+            respond(['success' => true, 'message' => 'Senha alterada com sucesso.']);
             break;
-
+        case 'list_users':     handleListUsers($pdo); break;
+        case 'create_user':    handleCreateUser($pdo, $input); break;
+        case 'update_user':    handleUpdateUser($pdo, $user, $input); break;
+        case 'reset_password': handleResetPassword($pdo, $user, $input); break;
         default:
-            http_response_code(400);
-            echo json_encode(['success' => false, 'error' => "Ação desconhecida: '$action'"]);
-            break;
+            throw new AppException('Ação desconhecida.', 400);
     }
-} catch (Exception $e) {
-    http_response_code(500);
+} catch (AppException $e) {
+    http_response_code($e->httpStatus);
     echo json_encode(['success' => false, 'error' => $e->getMessage()], JSON_UNESCAPED_UNICODE);
+} catch (Throwable $e) {
+    error_log('[senai-estoque] Erro interno na ação ' . $action . ': ' . $e->getMessage());
+    http_response_code(500);
+    echo json_encode(['success' => false, 'error' => 'Erro interno no servidor. Tente novamente; se persistir, avise o administrador.'], JSON_UNESCAPED_UNICODE);
 }
 
 // -----------------------------------------------------------------------------
-// Controladores de Ação
+// Utilitários
 // -----------------------------------------------------------------------------
 
-function handleGetAll(PDO $pdo) {
-    // 1. Produtos
-    $stmtProd = $pdo->query("SELECT * FROM `products` ORDER BY `name` ASC");
-    $rawProds = $stmtProd->fetchAll();
-    $products = array_map(function($p) {
-        return [
-            'id'             => (string)$p['id'],
-            'sku'            => (string)$p['sku'],
-            'name'           => (string)$p['name'],
-            'category'       => (string)$p['category'],
-            'unit'           => (string)$p['unit'],
-            'minStock'       => (int)$p['min_stock'],
-            'maxStock'       => $p['max_stock'] !== null ? (int)$p['max_stock'] : null,
-            'defaultExpiry'  => (string)($p['default_expiry'] ?? ''),
-            'storage'        => (string)($p['storage'] ?? ''),
-            'flagPerecivel'  => (bool)$p['flag_perecivel'],
-            'flagEpi'        => (bool)$p['flag_epi'],
-            'flagControlado' => (bool)$p['flag_controlado'],
-            'photo'          => (string)($p['photo'] ?? ''),
-            'observations'   => (string)($p['observations'] ?? '')
-        ];
-    }, $rawProds);
-
-    // 2. Slots (Mapa de Posições)
-    $stmtSlots = $pdo->query("SELECT * FROM `slots`");
-    $rawSlots = $stmtSlots->fetchAll();
-    $slots = [];
-    foreach ($rawSlots as $s) {
-        if ((int)$s['qty'] > 0 && !empty($s['product_id'])) {
-            $slots[$s['slot_code']] = [
-                'productId'    => (string)$s['product_id'],
-                'qty'          => (int)$s['qty'],
-                'entryDate'    => (string)($s['entry_date'] ?? ''),
-                'expiryDate'   => (string)($s['expiry_date'] ?? ''),
-                'lot'          => (string)($s['lot'] ?? ''),
-                'observations' => (string)($s['observations'] ?? '')
-            ];
-        }
-    }
-
-    // 3. Lotes não alocados (Estoque Geral)
-    $stmtLots = $pdo->query("SELECT * FROM `unallocated_lots` WHERE `qty` > 0");
-    $rawLots = $stmtLots->fetchAll();
-    $unallocatedLots = array_map(function($l) {
-        return [
-            'id'           => (string)$l['id'],
-            'productId'    => (string)$l['product_id'],
-            'qty'          => (int)$l['qty'],
-            'entryDate'    => (string)($l['entry_date'] ?? ''),
-            'expiryDate'   => (string)($l['expiry_date'] ?? ''),
-            'observations' => (string)($l['observations'] ?? '')
-        ];
-    }, $rawLots);
-
-    // 4. Slots Customizados
-    $stmtCustom = $pdo->query("SELECT * FROM `custom_slots`");
-    $rawCustom = $stmtCustom->fetchAll();
-    $customSlots = array_map(function($c) {
-        return [
-            'code'  => (string)$c['code'],
-            'label' => (string)$c['label']
-        ];
-    }, $rawCustom);
-
-    // 5. Histórico (limite dos 250 mais recentes)
-    $stmtHist = $pdo->query("SELECT * FROM `history` ORDER BY `created_at` DESC LIMIT 250");
-    $rawHist = $stmtHist->fetchAll();
-    $history = array_map(function($h) {
-        return [
-            'id'          => (string)$h['id'],
-            'timestamp'   => (string)$h['timestamp'],
-            'type'        => (string)$h['type'],
-            'productName' => (string)$h['product_name'],
-            'slotCode'    => (string)$h['slot_code'],
-            'qtyText'     => (string)$h['qty_text'],
-            'note'        => (string)($h['note'] ?? '-')
-        ];
-    }, $rawHist);
-
-    echo json_encode([
-        'success' => true,
-        'data'    => [
-            'products'        => $products,
-            'slots'           => (object)$slots,
-            'unallocatedLots' => $unallocatedLots,
-            'customSlots'     => $customSlots,
-            'history'         => $history,
-            'serverTime'      => date('Y-m-d H:i:s')
-        ]
-    ], JSON_UNESCAPED_UNICODE);
+function respond(array $data): void {
+    echo json_encode($data, JSON_UNESCAPED_UNICODE);
+    exit;
 }
 
-function handleSaveState(PDO $pdo) {
-    $rawInput = file_get_contents('php://input');
-    $payload = json_decode($rawInput, true);
-
-    if (!$payload || !is_array($payload)) {
-        http_response_code(400);
-        echo json_encode(['success' => false, 'error' => 'Corpo JSON inválido ou vazio']);
-        return;
+function readJsonBody(): array {
+    $raw = file_get_contents('php://input');
+    if ($raw === '' || $raw === false) return [];
+    if (strlen($raw) > 8 * 1024 * 1024) {
+        throw new AppException('Dados enviados grandes demais.', 413);
     }
-
-    $dirtyKeys = $payload['dirtyKeys'] ?? ['products', 'slots', 'lots', 'history'];
-    if (!is_array($dirtyKeys) || empty($dirtyKeys)) {
-        $dirtyKeys = ['products', 'slots', 'lots', 'history'];
+    $data = json_decode($raw, true);
+    if (!is_array($data)) {
+        throw new AppException('Corpo JSON inválido.', 400);
     }
-
-    $pdo->beginTransaction();
-
-    try {
-        // 1. Salvar Produtos
-        if (in_array('products', $dirtyKeys) && isset($payload['products']) && is_array($payload['products'])) {
-            $existingIds = [];
-            $stmtUpsert = $pdo->prepare("
-                INSERT INTO `products` (`id`, `sku`, `name`, `category`, `unit`, `min_stock`, `max_stock`, `default_expiry`, `storage`, `flag_perecivel`, `flag_epi`, `flag_controlado`, `photo`, `observations`)
-                VALUES (:id, :sku, :name, :category, :unit, :min_stock, :max_stock, :default_expiry, :storage, :flag_perecivel, :flag_epi, :flag_controlado, :photo, :observations)
-                ON DUPLICATE KEY UPDATE
-                    `sku` = VALUES(`sku`),
-                    `name` = VALUES(`name`),
-                    `category` = VALUES(`category`),
-                    `unit` = VALUES(`unit`),
-                    `min_stock` = VALUES(`min_stock`),
-                    `max_stock` = VALUES(`max_stock`),
-                    `default_expiry` = VALUES(`default_expiry`),
-                    `storage` = VALUES(`storage`),
-                    `flag_perecivel` = VALUES(`flag_perecivel`),
-                    `flag_epi` = VALUES(`flag_epi`),
-                    `flag_controlado` = VALUES(`flag_controlado`),
-                    `photo` = VALUES(`photo`),
-                    `observations` = VALUES(`observations`)
-            ");
-
-            foreach ($payload['products'] as $p) {
-                if (empty($p['id'])) continue;
-                $existingIds[] = $p['id'];
-                $stmtUpsert->execute([
-                    ':id'              => (string)$p['id'],
-                    ':sku'             => (string)($p['sku'] ?? 'PRD-000'),
-                    ':name'            => (string)($p['name'] ?? 'Sem Nome'),
-                    ':category'        => (string)($p['category'] ?? 'Geral'),
-                    ':unit'            => (string)($p['unit'] ?? 'un'),
-                    ':min_stock'       => (int)($p['minStock'] ?? 0),
-                    ':max_stock'       => isset($p['maxStock']) && $p['maxStock'] !== '' ? (int)$p['maxStock'] : null,
-                    ':default_expiry'  => (string)($p['defaultExpiry'] ?? ''),
-                    ':storage'         => (string)($p['storage'] ?? ''),
-                    ':flag_perecivel'  => !empty($p['flagPerecivel']) ? 1 : 0,
-                    ':flag_epi'        => !empty($p['flagEpi']) ? 1 : 0,
-                    ':flag_controlado' => !empty($p['flagControlado']) ? 1 : 0,
-                    ':photo'           => (string)($p['photo'] ?? ''),
-                    ':observations'    => (string)($p['observations'] ?? '')
-                ]);
-            }
-
-            // Remove produtos que foram excluídos da lista
-            if (!empty($existingIds)) {
-                $inClause = implode(',', array_fill(0, count($existingIds), '?'));
-                $stmtDel = $pdo->prepare("DELETE FROM `products` WHERE `id` NOT IN ($inClause)");
-                $stmtDel->execute($existingIds);
-            } else {
-                $pdo->exec("DELETE FROM `products`");
-            }
-        }
-
-        // 2. Salvar Slots (Posições do Mapa)
-        if (in_array('slots', $dirtyKeys) && isset($payload['slots']) && is_array($payload['slots'])) {
-            $pdo->exec("DELETE FROM `slots`");
-            $stmtSlot = $pdo->prepare("
-                INSERT INTO `slots` (`slot_code`, `product_id`, `qty`, `entry_date`, `expiry_date`, `lot`, `observations`)
-                VALUES (:slot_code, :product_id, :qty, :entry_date, :expiry_date, :lot, :observations)
-            ");
-
-            foreach ($payload['slots'] as $code => $slot) {
-                if (!$slot || empty($slot['productId']) || (int)($slot['qty'] ?? 0) <= 0) continue;
-                $stmtSlot->execute([
-                    ':slot_code'    => (string)$code,
-                    ':product_id'   => (string)$slot['productId'],
-                    ':qty'          => (int)$slot['qty'],
-                    ':entry_date'   => (string)($slot['entryDate'] ?? ''),
-                    ':expiry_date'  => (string)($slot['expiryDate'] ?? ''),
-                    ':lot'          => (string)($slot['lot'] ?? ''),
-                    ':observations' => (string)($slot['observations'] ?? '')
-                ]);
-            }
-
-            // Custom Slots
-            if (isset($payload['customSlots']) && is_array($payload['customSlots'])) {
-                $pdo->exec("DELETE FROM `custom_slots`");
-                $stmtCustom = $pdo->prepare("INSERT INTO `custom_slots` (`code`, `label`) VALUES (:code, :label)");
-                foreach ($payload['customSlots'] as $cs) {
-                    if (empty($cs['code'])) continue;
-                    $stmtCustom->execute([
-                        ':code'  => (string)$cs['code'],
-                        ':label' => (string)($cs['label'] ?? $cs['code'])
-                    ]);
-                }
-            }
-        }
-
-        // 3. Salvar Lotes Não Alocados
-        if (in_array('lots', $dirtyKeys) && isset($payload['unallocatedLots']) && is_array($payload['unallocatedLots'])) {
-            $pdo->exec("DELETE FROM `unallocated_lots`");
-            $stmtLot = $pdo->prepare("
-                INSERT INTO `unallocated_lots` (`id`, `product_id`, `qty`, `entry_date`, `expiry_date`, `observations`)
-                VALUES (:id, :product_id, :qty, :entry_date, :expiry_date, :observations)
-            ");
-
-            foreach ($payload['unallocatedLots'] as $lot) {
-                if (!$lot || empty($lot['productId']) || (int)($lot['qty'] ?? 0) <= 0) continue;
-                $stmtLot->execute([
-                    ':id'           => (string)($lot['id'] ?? ('lot-' . uniqid())),
-                    ':product_id'   => (string)$lot['productId'],
-                    ':qty'          => (int)$lot['qty'],
-                    ':entry_date'   => (string)($lot['entryDate'] ?? ''),
-                    ':expiry_date'  => (string)($lot['expiryDate'] ?? ''),
-                    ':observations' => (string)($lot['observations'] ?? '')
-                ]);
-            }
-        }
-
-        // 4. Salvar Histórico
-        if (in_array('history', $dirtyKeys) && isset($payload['history']) && is_array($payload['history'])) {
-            $stmtHist = $pdo->prepare("
-                INSERT INTO `history` (`id`, `timestamp`, `type`, `product_name`, `slot_code`, `qty_text`, `note`)
-                VALUES (:id, :timestamp, :type, :product_name, :slot_code, :qty_text, :note)
-                ON DUPLICATE KEY UPDATE `id` = `id`
-            ");
-
-            // Insere os 250 mais recentes
-            $sliceHist = array_slice($payload['history'], 0, 250);
-            foreach ($sliceHist as $h) {
-                if (empty($h['id'])) continue;
-                $stmtHist->execute([
-                    ':id'           => (string)$h['id'],
-                    ':timestamp'    => (string)($h['timestamp'] ?? date('d/m/Y H:i:s')),
-                    ':type'         => (string)($h['type'] ?? 'GERAL'),
-                    ':product_name' => (string)($h['productName'] ?? '-'),
-                    ':slot_code'    => (string)($h['slotCode'] ?? '-'),
-                    ':qty_text'     => (string)($h['qtyText'] ?? '-'),
-                    ':note'         => (string)($h['note'] ?? '-')
-                ]);
-            }
-        }
-
-        $pdo->commit();
-        echo json_encode(['success' => true, 'message' => 'Dados persistidos com sucesso no MySQL']);
-    } catch (Exception $e) {
-        $pdo->rollBack();
-        throw $e;
-    }
+    return $data;
 }
 
-function handleResetAll(PDO $pdo) {
-    $pdo->beginTransaction();
-    try {
-        $pdo->exec("DELETE FROM `slots`");
-        $pdo->exec("DELETE FROM `unallocated_lots`");
-        $pdo->exec("DELETE FROM `custom_slots`");
-        $pdo->exec("DELETE FROM `history`");
-        $pdo->exec("DELETE FROM `products`");
-        $pdo->commit();
-        echo json_encode(['success' => true, 'message' => 'Banco de dados MySQL reiniciado com sucesso.']);
-    } catch (Exception $e) {
-        $pdo->rollBack();
-        throw $e;
+// -----------------------------------------------------------------------------
+// Usuários (somente administradores, exceto troca da própria senha)
+// -----------------------------------------------------------------------------
+
+function fetchUserRow(PDO $pdo, int $id): array {
+    $stmt = $pdo->prepare('SELECT * FROM `users` WHERE `id` = ?');
+    $stmt->execute([$id]);
+    $row = $stmt->fetch();
+    if (!$row) throw new AppException('Usuário não encontrado.', 404);
+    return $row;
+}
+
+function handleListUsers(PDO $pdo): void {
+    $rows = $pdo->query("
+        SELECT `id`, `username`, `display_name`, `role`, `active`, `must_change_password`, `locked_until`, `last_login_at`, `created_at`
+          FROM `users` ORDER BY `active` DESC, `display_name` ASC
+    ")->fetchAll();
+
+    $users = array_map(function ($u) {
+        return [
+            'id'                 => (int)$u['id'],
+            'username'           => (string)$u['username'],
+            'displayName'        => (string)$u['display_name'],
+            'role'               => (string)$u['role'],
+            'active'             => (bool)$u['active'],
+            'mustChangePassword' => (bool)$u['must_change_password'],
+            'locked'             => !empty($u['locked_until']) && strtotime($u['locked_until']) > time(),
+            'lastLoginAt'        => (string)($u['last_login_at'] ?? ''),
+            'createdAt'          => (string)($u['created_at'] ?? ''),
+        ];
+    }, $rows);
+
+    respond(['success' => true, 'users' => $users]);
+}
+
+function handleCreateUser(PDO $pdo, array $input): void {
+    $tempPassword = generateTempPassword();
+    $username = validateUsername((string)($input['username'] ?? ''));
+    $id = createUser($pdo, $username, (string)($input['displayName'] ?? ''), $tempPassword, (string)($input['role'] ?? ROLE_OPERADOR), true);
+    respond(['success' => true, 'id' => $id, 'username' => $username, 'tempPassword' => $tempPassword]);
+}
+
+function handleUpdateUser(PDO $pdo, array $me, array $input): void {
+    $id  = (int)($input['id'] ?? 0);
+    $row = fetchUserRow($pdo, $id);
+
+    $displayName = array_key_exists('displayName', $input) ? validateDisplayName((string)$input['displayName']) : $row['display_name'];
+    $role        = array_key_exists('role', $input) ? validateRole((string)$input['role']) : $row['role'];
+    $active      = array_key_exists('active', $input) ? (bool)$input['active'] : (bool)$row['active'];
+
+    $losesAdmin = $row['role'] === ROLE_ADMIN && (int)$row['active'] === 1 && ($role !== ROLE_ADMIN || !$active);
+    if ($losesAdmin) {
+        if ($id === $me['id']) {
+            throw new AppException('Você não pode remover o seu próprio acesso de administrador.');
+        }
+        if (countActiveAdmins($pdo) <= 1) {
+            throw new AppException('O sistema precisa de pelo menos um administrador ativo.');
+        }
     }
+
+    $pdo->prepare('UPDATE `users` SET `display_name` = ?, `role` = ?, `active` = ? WHERE `id` = ?')
+        ->execute([$displayName, $role, $active ? 1 : 0, $id]);
+
+    respond(['success' => true, 'message' => 'Usuário atualizado.']);
+}
+
+function handleResetPassword(PDO $pdo, array $me, array $input): void {
+    $id = (int)($input['id'] ?? 0);
+    $row = fetchUserRow($pdo, $id);
+    if ($id === $me['id']) {
+        throw new AppException('Para trocar a sua própria senha, use "Alterar senha" no menu do usuário.');
+    }
+    $tempPassword = generateTempPassword();
+    $pdo->prepare('UPDATE `users` SET `password_hash` = ?, `must_change_password` = 1, `failed_attempts` = 0, `locked_until` = NULL WHERE `id` = ?')
+        ->execute([password_hash($tempPassword, PASSWORD_DEFAULT), $id]);
+
+    respond(['success' => true, 'username' => $row['username'], 'tempPassword' => $tempPassword]);
 }

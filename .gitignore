@@ -1,3 +1,10 @@
 .agents/
+
+# Mantidos fora do repositório por decisão da equipe
 database.sql
 plano_de_implementacao.txt
+
+# Credenciais locais (use .env.example como modelo)
+.env
+.env.*
+!.env.example

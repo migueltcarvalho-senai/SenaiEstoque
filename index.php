@@ -1,12 +1,40 @@
+<?php
+// Página principal protegida: exige sessão válida (senão redireciona para login.php)
+require_once __DIR__ . '/auth.php';
+try {
+    $currentUser = requirePageUser();
+} catch (PDOException $e) {
+    error_log('[senai-estoque] Falha de conexão ao abrir index.php: ' . $e->getMessage());
+    header('Location: login.php');
+    exit;
+}
+header('Cache-Control: no-store');
+header('X-Frame-Options: DENY');
+header('X-Content-Type-Options: nosniff');
+$csrfToken = csrfToken();
+$clientUser = [
+    'id'          => $currentUser['id'],
+    'username'    => $currentUser['username'],
+    'displayName' => $currentUser['displayName'],
+    'role'        => $currentUser['role'],
+];
+$roleClass = $currentUser['role'] === ROLE_ADMIN ? 'role-admin' : 'role-operador';
+?>
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="csrf-token" content="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
+    <script>
+        // Usuário da sessão (somente para exibição/ocultar botões — o servidor valida tudo)
+        window.APP_USER = <?= json_encode($clientUser, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_UNESCAPED_UNICODE) ?>;
+    </script>
     <title>SENAI 2D — Gestão de Estoque & Endereçamento</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://unpkg.com/lucide@latest"></script>
-    <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+    <!-- Bibliotecas externas com versão fixa (+ SRI onde o CDN permite) -->
+    <script src="https://cdn.tailwindcss.com/3.4.16"></script>
+    <script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js" integrity="sha384-ieG+IKD0d/ZPXyCBTMVAbqsQdns8QGJR/e26WMw7M4fkaI/rHcS/YIoi+ah9WGge" crossorigin="anonymous"></script>
+    <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js" integrity="sha384-EnyY0/GSHQGSxSgMwaIPzSESbqoOLSexfnSMN2AP+39Ckmn92stwABZynq1JyzdT" crossorigin="anonymous"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -37,9 +65,12 @@
             outline: 3px solid #E30613;
             outline-offset: 1px;
         }
+
+        /* Elementos exclusivos do administrador (a API também bloqueia as ações) */
+        body.role-operador .admin-only { display: none !important; }
     </style>
 </head>
-<body class="bg-[#F4F6F9] text-slate-800 font-sans antialiased min-h-screen flex flex-col">
+<body class="bg-[#F4F6F9] text-slate-800 font-sans antialiased min-h-screen flex flex-col <?= $roleClass ?>">
     <a href="#main-content" class="sr-only focus:not-sr-only focus:absolute focus:top-2 focus:left-2 focus:z-50 focus:p-2 focus:bg-white focus:text-[#0F294A] focus:font-bold focus:rounded-md">Pular para o conteúdo</a>
 
     <!-- Cabeçalho Institucional Azul-Marinho & Linha Vermelha -->
@@ -97,14 +128,45 @@
                         <button onclick="exportJSON()" title="Salvar Backup JSON" class="p-2 rounded-lg bg-[#183B66] hover:bg-[#1F497D] border border-white/15 text-slate-200 hover:text-white transition-colors">
                             <i data-lucide="save" class="w-3.5 h-3.5"></i>
                         </button>
-                        <label for="header-import-json" title="Restaurar Backup JSON" class="p-2 rounded-lg bg-[#183B66] hover:bg-[#1F497D] border border-white/15 text-slate-200 hover:text-white transition-colors cursor-pointer">
+                        <label for="header-import-json" title="Restaurar Backup JSON" class="admin-only p-2 rounded-lg bg-[#183B66] hover:bg-[#1F497D] border border-white/15 text-slate-200 hover:text-white transition-colors cursor-pointer">
                             <i data-lucide="upload" class="w-3.5 h-3.5"></i>
                             <input type="file" id="header-import-json" aria-label="Restaurar arquivo de backup JSON" accept=".json" onchange="importJSON(event)" class="hidden">
                         </label>
-                        <button onclick="confirmClearAllData()" title="Limpar Todos os Dados Salvos" class="bg-rose-950/70 hover:bg-[#E30613] text-rose-200 hover:text-white border border-rose-400/30 text-xs font-semibold px-2.5 py-2 rounded-lg transition-all flex items-center gap-1">
+                        <button onclick="confirmClearAllData()" title="Limpar Todos os Dados Salvos" class="admin-only bg-rose-950/70 hover:bg-[#E30613] text-rose-200 hover:text-white border border-rose-400/30 text-xs font-semibold px-2.5 py-2 rounded-lg transition-all flex items-center gap-1">
                             <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
                             <span class="hidden xl:inline">Limpar</span>
                         </button>
+                    </div>
+
+                    <!-- Menu do Usuário Logado -->
+                    <div class="relative pl-1.5 border-l border-white/15" id="user-menu-wrap">
+                        <button type="button" id="user-menu-btn" onclick="toggleUserMenu()" aria-haspopup="true" aria-expanded="false" aria-controls="user-menu"
+                                class="flex items-center gap-2 rounded-lg px-2 py-1.5 hover:bg-white/10 transition-colors">
+                            <span id="user-avatar" class="w-8 h-8 rounded-full bg-[#E30613] text-white text-xs font-extrabold flex items-center justify-center shrink-0" aria-hidden="true">--</span>
+                            <span class="hidden sm:flex flex-col items-start leading-tight min-w-0">
+                                <span id="user-display-name" class="text-xs font-bold text-white truncate max-w-[140px]">—</span>
+                                <span id="user-role-label" class="text-[10px] font-semibold uppercase tracking-wider text-sky-200">—</span>
+                            </span>
+                            <i data-lucide="chevron-down" class="w-3.5 h-3.5 text-slate-300"></i>
+                        </button>
+                        <div id="user-menu" role="menu" class="hidden absolute right-0 mt-2 w-60 bg-white text-slate-800 rounded-xl shadow-xl border border-slate-200 py-1.5 z-40">
+                            <div class="px-3.5 py-2 border-b border-slate-100">
+                                <p id="user-menu-name" class="text-sm font-bold text-slate-900 truncate">—</p>
+                                <p id="user-menu-username" class="text-xs text-slate-600 truncate">—</p>
+                            </div>
+                            <button type="button" role="menuitem" onclick="openChangePasswordModal()" class="w-full text-left px-3.5 py-2.5 text-sm font-medium hover:bg-slate-50 flex items-center gap-2">
+                                <i data-lucide="key-round" class="w-4 h-4 text-[#0F294A]"></i> Alterar minha senha
+                            </button>
+                            <button type="button" role="menuitem" onclick="openUsersModal()" class="admin-only w-full text-left px-3.5 py-2.5 text-sm font-medium hover:bg-slate-50 flex items-center gap-2">
+                                <i data-lucide="users" class="w-4 h-4 text-[#0F294A]"></i> Gerenciar usuários
+                            </button>
+                            <form method="post" action="logout.php" class="border-t border-slate-100 mt-1 pt-1">
+                                <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
+                                <button type="submit" role="menuitem" class="w-full text-left px-3.5 py-2.5 text-sm font-semibold text-[#C80510] hover:bg-rose-50 flex items-center gap-2">
+                                    <i data-lucide="log-out" class="w-4 h-4"></i> Sair
+                                </button>
+                            </form>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -473,7 +535,7 @@
 
                 <div class="flex items-center gap-2.5 shrink-0">
                     <span class="text-xs font-semibold text-slate-500">Ocupação: <strong id="map-occupied-pill" class="text-[#0F294A]">0 / 15</strong></span>
-                    <button onclick="openLayoutConfigModal()" class="px-3 py-2 rounded-lg text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-200 flex items-center gap-1.5">
+                    <button onclick="openLayoutConfigModal()" class="admin-only px-3 py-2 rounded-lg text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-200 flex items-center gap-1.5">
                         <i data-lucide="settings-2" class="w-3.5 h-3.5"></i>
                         <span>+ Posição Extra</span>
                     </button>
@@ -611,8 +673,12 @@
                             <option value="SAIDA">Saídas / Baixas</option>
                             <option value="TRANSFERENCIA">Transferências</option>
                             <option value="VALIDADE">Ajustes de Validade</option>
+                            <option value="CADASTRO">Cadastros de Produto</option>
+                            <option value="EDICAO">Edições de Produto</option>
+                            <option value="EXCLUSAO">Exclusões de Produto</option>
+                            <option value="SISTEMA">Ações do Sistema</option>
                         </select>
-                        <button onclick="clearHistoryLog()" class="text-xs font-semibold text-rose-600 hover:bg-rose-50 px-3 py-2 rounded-xl border border-rose-200">
+                        <button onclick="clearHistoryLog()" class="admin-only text-xs font-semibold text-rose-600 hover:bg-rose-50 px-3 py-2 rounded-xl border border-rose-200">
                             Limpar Histórico
                         </button>
                     </div>
@@ -627,6 +693,7 @@
                                 <th class="py-3 px-4">Posição</th>
                                 <th class="py-3 px-4">Quantidade</th>
                                 <th class="py-3 px-4">Observação</th>
+                                <th class="py-3 px-4">Usuário</th>
                             </tr>
                         </thead>
                         <tbody id="history-tbody" class="divide-y divide-slate-100 text-xs"></tbody>
@@ -665,7 +732,7 @@
                     <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
                         <div class="sm:col-span-3">
                             <label class="block text-xs font-bold text-slate-700 mb-1.5">Nome do Produto <span class="text-[#E30613]">*</span></label>
-                            <input type="text" id="prod-name" required
+                            <input type="text" id="prod-name" required oninput="onProductNameInput()"
                                 placeholder="Ex: Tomate Italiano, Arroz Branco 5 kg, Álcool 70%..."
                                 class="w-full text-sm bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-[#0F294A] focus:border-transparent transition-all">
                         </div>
@@ -677,7 +744,7 @@
                         </div>
                         <div class="sm:col-span-2">
                             <label class="block text-xs font-bold text-slate-700 mb-1.5">Categoria <span class="text-[#E30613]">*</span></label>
-                            <select id="prod-category" required onchange="onCategoryChange()"
+                            <select id="prod-category" required onchange="this.dataset.userEdited = '1'; onCategoryChange()"
                                 class="w-full text-xs bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 focus:outline-none focus:ring-2 focus:ring-[#0F294A] focus:border-transparent transition-all">
                                 <option value="">Selecione a categoria</option>
                                 <optgroup label="Alimentos">
@@ -694,12 +761,15 @@
                                     <option value="Higiene & Limpeza">Higiene & Limpeza</option>
                                     <option value="Material de Escritório">Material de Escritório</option>
                                 </optgroup>
+                                <option value="Geral">Geral (sem categoria específica)</option>
                                 <option value="Outra">Outra (especificar abaixo)</option>
                             </select>
+                            <p id="prod-category-auto" class="hidden text-[10px] text-slate-500 mt-1"></p>
                         </div>
                         <div id="prod-custom-category-wrap" class="sm:col-span-3 hidden">
                             <label class="block text-xs font-bold text-slate-700 mb-1.5">Nome da Categoria <span class="text-[#E30613]">*</span></label>
                             <input type="text" id="prod-custom-category"
+                                oninput="document.getElementById('prod-category').dataset.userEdited = '1'"
                                 placeholder="Ex: Suprimentos de TI, Materiais de Limpeza Pesada..."
                                 class="w-full text-xs bg-slate-50 border border-amber-300 rounded-xl px-3.5 py-2.5 focus:outline-none focus:ring-2 focus:ring-amber-500 transition-all">
                         </div>
@@ -1081,6 +1151,101 @@
         </div>
     </div>
 
+    <!-- MODAL 9: ALTERAR A PRÓPRIA SENHA -->
+    <div id="modal-change-password" class="hidden fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+        <div class="bg-white rounded-2xl max-w-md w-full shadow-2xl border border-slate-200 overflow-hidden" role="dialog" aria-modal="true" aria-labelledby="change-password-title">
+            <div class="bg-[#0F294A] border-b-2 border-[#E30613] px-5 py-4 text-white flex items-center justify-between">
+                <h3 id="change-password-title" class="text-sm font-extrabold">Alterar minha senha</h3>
+                <button type="button" onclick="closeModal('modal-change-password')" class="text-white/80 hover:text-white" aria-label="Fechar">
+                    <i data-lucide="x" class="w-5 h-5"></i>
+                </button>
+            </div>
+            <form onsubmit="saveChangePasswordForm(event)" class="p-5 space-y-4" novalidate>
+                <div>
+                    <label for="cp-current" class="block text-xs font-bold text-slate-700 mb-1">Senha atual</label>
+                    <input type="password" id="cp-current" autocomplete="current-password" required class="w-full text-sm bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 focus:outline-none focus:ring-2 focus:ring-[#0F294A]">
+                </div>
+                <div>
+                    <label for="cp-new" class="block text-xs font-bold text-slate-700 mb-1">Nova senha</label>
+                    <input type="password" id="cp-new" autocomplete="new-password" required minlength="8" class="w-full text-sm bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 focus:outline-none focus:ring-2 focus:ring-[#0F294A]">
+                    <p class="mt-1 text-xs text-slate-600">Mínimo de 8 caracteres, com letras e números.</p>
+                </div>
+                <div>
+                    <label for="cp-confirm" class="block text-xs font-bold text-slate-700 mb-1">Confirme a nova senha</label>
+                    <input type="password" id="cp-confirm" autocomplete="new-password" required minlength="8" class="w-full text-sm bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 focus:outline-none focus:ring-2 focus:ring-[#0F294A]">
+                </div>
+                <p id="cp-error" class="hidden rounded-xl border border-red-200 bg-red-50 px-3.5 py-2.5 text-xs font-semibold text-red-800" role="alert"></p>
+                <div class="flex justify-end gap-2 pt-2 border-t border-slate-100">
+                    <button type="button" onclick="closeModal('modal-change-password')" class="px-4 py-2 rounded-xl text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700">Cancelar</button>
+                    <button type="submit" id="cp-submit" class="px-5 py-2 rounded-xl text-xs font-bold bg-[#0F294A] hover:bg-[#183B66] text-white disabled:opacity-60">Salvar nova senha</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- MODAL 10: GERENCIAR USUÁRIOS (ADMIN) -->
+    <div id="modal-users" class="hidden fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+        <div class="bg-white rounded-2xl max-w-3xl w-full shadow-2xl border border-slate-200 overflow-hidden max-h-[95vh] flex flex-col" role="dialog" aria-modal="true" aria-labelledby="users-modal-title">
+            <div class="bg-[#0F294A] border-b-2 border-[#E30613] px-5 py-4 text-white flex items-center justify-between shrink-0">
+                <div class="flex items-center gap-2">
+                    <i data-lucide="users" class="w-5 h-5 text-sky-300"></i>
+                    <h3 id="users-modal-title" class="text-sm font-extrabold">Gerenciar usuários</h3>
+                </div>
+                <button type="button" onclick="closeModal('modal-users')" class="text-white/80 hover:text-white" aria-label="Fechar">
+                    <i data-lucide="x" class="w-5 h-5"></i>
+                </button>
+            </div>
+            <div class="p-5 space-y-5 overflow-y-auto">
+                <!-- Senha temporária gerada (exibida uma única vez) -->
+                <div id="users-temp-password" class="hidden rounded-xl border border-emerald-300 bg-emerald-50 p-4 text-sm text-emerald-900" role="status">
+                    <p class="font-bold">Senha temporária de <span id="users-temp-username"></span>:</p>
+                    <div class="mt-2 flex flex-wrap items-center gap-2">
+                        <code id="users-temp-value" class="px-3 py-1.5 rounded-lg bg-white border border-emerald-300 text-base font-extrabold tracking-wider text-slate-900 select-all"></code>
+                        <button type="button" onclick="copyTempPassword()" class="px-3 py-1.5 rounded-lg text-xs font-bold bg-emerald-700 hover:bg-emerald-800 text-white">Copiar</button>
+                    </div>
+                    <p class="mt-2 text-xs">Entregue essa senha ao usuário. Ela não será exibida novamente e precisará ser trocada no primeiro acesso.</p>
+                </div>
+
+                <!-- Novo usuário -->
+                <form onsubmit="saveNewUserForm(event)" class="rounded-xl border border-slate-200 bg-slate-50 p-4 space-y-3" novalidate>
+                    <p class="text-xs font-extrabold uppercase tracking-wider text-slate-600">Novo usuário</p>
+                    <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                        <div>
+                            <label for="nu-name" class="block text-xs font-bold text-slate-700 mb-1">Nome completo</label>
+                            <input type="text" id="nu-name" required maxlength="100" autocomplete="off" class="w-full text-sm bg-white border border-slate-300 rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-[#0F294A]">
+                        </div>
+                        <div>
+                            <label for="nu-username" class="block text-xs font-bold text-slate-700 mb-1">Usuário (login)</label>
+                            <input type="text" id="nu-username" required maxlength="32" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="ex.: maria.souza" class="w-full text-sm bg-white border border-slate-300 rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-[#0F294A]">
+                        </div>
+                        <div>
+                            <label for="nu-role" class="block text-xs font-bold text-slate-700 mb-1">Perfil</label>
+                            <select id="nu-role" class="w-full text-sm bg-white border border-slate-300 rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-[#0F294A]">
+                                <option value="operador">Operador</option>
+                                <option value="admin">Administrador</option>
+                            </select>
+                        </div>
+                    </div>
+                    <p id="nu-error" class="hidden rounded-xl border border-red-200 bg-red-50 px-3.5 py-2.5 text-xs font-semibold text-red-800" role="alert"></p>
+                    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                        <p class="text-xs text-slate-600">Uma senha temporária será gerada automaticamente.</p>
+                        <button type="submit" id="nu-submit" class="px-4 py-2 rounded-xl text-xs font-bold bg-[#E30613] hover:bg-[#C80510] text-white disabled:opacity-60">+ Criar usuário</button>
+                    </div>
+                </form>
+
+                <!-- Lista -->
+                <div>
+                    <p class="text-xs font-extrabold uppercase tracking-wider text-slate-600 mb-2">Usuários cadastrados</p>
+                    <div id="users-list" class="space-y-2" aria-live="polite"></div>
+                </div>
+                <div class="text-xs text-slate-600 rounded-xl border border-slate-200 p-3 space-y-1">
+                    <p><strong>Administrador:</strong> tudo do operador + excluir produtos, posições extras do mapa, limpar histórico/dados, restaurar backup e gerenciar usuários.</p>
+                    <p><strong>Operador:</strong> cadastrar/editar produtos, entradas, saídas, transferências, validades, importação (modo mesclar) e exportações.</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- TOAST DE NOTIFICAÇÃO -->
     <div id="toast-container" class="fixed bottom-5 right-5 z-50 flex flex-col gap-2 pointer-events-none"></div>
 
@@ -1088,9 +1253,9 @@
          LÓGICA COMPLETA DO SISTEMA + BANCO DE DADOS PERSISTENTE (FIRESTORE / IDB)
          ========================================================================= -->
     <script>
-        let isSaving = false;
         let isSyncing = false;
-        const dirtyDocs = new Set();
+        let opsInFlight = 0;   // operações de escrita em andamento
+        let stateVersion = 0;  // incrementa a cada operação, para descartar polling desatualizado
 
         // Sanitização contra XSS para qualquer conteúdo interpolado em innerHTML
         function escapeHtml(value) {
@@ -1110,8 +1275,13 @@
             return '';
         }
 
-        function markDirty(...docKeys) {
-            docKeys.forEach(k => dirtyDocs.add(k));
+        /**
+         * Argumento seguro para handlers inline (onclick="fn(${jsArg(x)})").
+         * JSON.stringify escapa aspas/barras para o JavaScript e escapeHtml
+         * protege o atributo HTML — escapeHtml sozinho NÃO basta nesse contexto.
+         */
+        function jsArg(value) {
+            return escapeHtml(JSON.stringify(String(value ?? '')));
         }
 
         function todayISO() {
@@ -1206,97 +1376,212 @@
         // COMUNICAÇÃO COM O BACKEND PHP / MYSQL
         // =========================================================================
 
+        // =========================================================================
+        // SESSÃO / USUÁRIO LOGADO
+        // =========================================================================
+
+        const CSRF_TOKEN = document.querySelector('meta[name="csrf-token"]')?.content || '';
+        const ROLE_LABELS = { admin: 'Administrador', operador: 'Operador' };
+
+        function isAdminUser() {
+            return window.APP_USER?.role === 'admin';
+        }
+
+        /** Bloqueia no cliente ações exclusivas do administrador (o servidor também valida). */
+        function requireAdminAction() {
+            if (isAdminUser()) return true;
+            showToast('Ação permitida somente para administradores.', 'error');
+            return false;
+        }
+
+        class ApiError extends Error {
+            constructor(message, status) {
+                super(message);
+                this.status = status;
+            }
+        }
+
+        let sessionExpiredHandled = false;
+        function handleSessionExpired() {
+            if (sessionExpiredHandled) return;
+            sessionExpiredHandled = true;
+            showToast('Sua sessão expirou. Redirecionando para o login...', 'error');
+            setTimeout(() => { window.location.href = 'login.php?expirada=1'; }, 1200);
+        }
+
+        /**
+         * Chamada padrão à API: envia cookie de sessão + token CSRF e
+         * converte respostas de erro em ApiError com a mensagem do servidor.
+         */
+        async function apiFetch(action, { method = 'GET', body } = {}) {
+            const opts = {
+                method,
+                cache: 'no-store',
+                credentials: 'same-origin',
+                headers: { 'Accept': 'application/json' }
+            };
+            if (method !== 'GET') {
+                opts.headers['Content-Type'] = 'application/json';
+                opts.headers['X-CSRF-Token'] = CSRF_TOKEN;
+                opts.body = JSON.stringify(body || {});
+            }
+
+            let response;
+            try {
+                response = await fetch(`api.php?action=${encodeURIComponent(action)}`, opts);
+            } catch (networkErr) {
+                throw new ApiError('Sem conexão com o servidor. Verifique a rede.', 0);
+            }
+
+            let json = null;
+            try { json = await response.json(); } catch (_) { /* resposta não-JSON */ }
+
+            if (response.status === 401) {
+                handleSessionExpired();
+                throw new ApiError(json?.error || 'Sessão expirada.', 401);
+            }
+            if (!response.ok || !json || json.success === false) {
+                throw new ApiError(json?.error || `Erro inesperado do servidor (HTTP ${response.status}).`, response.status);
+            }
+            return json;
+        }
+
+        function applyServerData(data) {
+            appState.products = Array.isArray(data.products) ? data.products : [];
+            appState.slots = (data.slots && typeof data.slots === 'object') ? data.slots : {};
+            appState.unallocatedLots = Array.isArray(data.unallocatedLots) ? data.unallocatedLots : [];
+            appState.customSlots = Array.isArray(data.customSlots) ? data.customSlots : [];
+            appState.history = Array.isArray(data.history) ? data.history : [];
+        }
+
+        function renderUserHeader() {
+            const u = window.APP_USER || {};
+            const name = u.displayName || u.username || '—';
+            const initials = name.split(/\s+/).filter(Boolean).slice(0, 2).map(w => w[0]).join('').toUpperCase() || '--';
+            document.getElementById('user-avatar').textContent = initials;
+            document.getElementById('user-display-name').textContent = name;
+            document.getElementById('user-role-label').textContent = ROLE_LABELS[u.role] || u.role || '';
+            document.getElementById('user-menu-name').textContent = name;
+            document.getElementById('user-menu-username').textContent = `@${u.username || ''} • ${ROLE_LABELS[u.role] || ''}`;
+
+            // Operador não pode usar o modo "substituir" da importação (excluiria produtos)
+            if (!isAdminUser()) {
+                document.querySelector('#import-mode option[value="replace"]')?.remove();
+            }
+        }
+
+        function toggleUserMenu(forceOpen) {
+            const menu = document.getElementById('user-menu');
+            const btn = document.getElementById('user-menu-btn');
+            const open = typeof forceOpen === 'boolean' ? forceOpen : menu.classList.contains('hidden');
+            menu.classList.toggle('hidden', !open);
+            btn.setAttribute('aria-expanded', String(open));
+        }
+
+        document.addEventListener('click', (ev) => {
+            const wrap = document.getElementById('user-menu-wrap');
+            if (wrap && !wrap.contains(ev.target)) toggleUserMenu(false);
+        });
+        document.addEventListener('keydown', (ev) => {
+            if (ev.key === 'Escape') toggleUserMenu(false);
+        });
+
+        // =========================================================================
+        // COMUNICAÇÃO COM O BACKEND PHP / MYSQL
+        // =========================================================================
+
+        // O servidor é a fonte da verdade: cada ação chama uma operação da API
+        // (validada e registrada no histórico lá) e a resposta traz o estado atualizado.
+
         async function initDatabase() {
             updateDbStatusUI('connecting', 'Conectando ao MySQL...');
             try {
-                const response = await fetch('api.php?action=get_all', { cache: 'no-store' });
-                const json = await response.json();
-                if (json.success && json.data) {
-                    appState.products = Array.isArray(json.data.products) ? json.data.products : [];
-                    appState.slots = (json.data.slots && typeof json.data.slots === 'object') ? json.data.slots : {};
-                    appState.unallocatedLots = Array.isArray(json.data.unallocatedLots) ? json.data.unallocatedLots : [];
-                    appState.customSlots = Array.isArray(json.data.customSlots) ? json.data.customSlots : [];
-                    appState.history = Array.isArray(json.data.history) ? json.data.history : [];
+                const json = await apiFetch('get_all');
+                applyServerData(json.data || {});
+                updateDbStatusUI('connected', 'Banco MySQL Conectado');
+                renderAll();
 
-                    updateDbStatusUI('connected', 'Banco MySQL Conectado');
-                    renderAll();
-
-                    // Sincronização periódica em segundo plano (a cada 6 segundos)
-                    setInterval(pollDatabaseUpdates, 6000);
-                    return;
-                } else {
-                    throw new Error(json.error || 'Resposta inválida do servidor');
-                }
+                // Sincronização periódica em segundo plano (a cada 6 segundos)
+                setInterval(pollDatabaseUpdates, 6000);
             } catch (err) {
                 console.error('Erro ao conectar ao PHP/MySQL:', err);
+                if (err.status === 401) return;
                 updateDbStatusUI('error', 'Sem conexão MySQL');
-                showToast('Aviso: Não foi possível carregar os dados do MySQL. Verifique api.php / config.php', 'error');
+                showToast('Não foi possível carregar os dados: ' + err.message, 'error');
                 renderAll();
             }
         }
 
-        async function pollDatabaseUpdates() {
+        async function pollDatabaseUpdates({ force = false } = {}) {
             // Não sincroniza enquanto estiver salvando ou com modais de edição abertos
-            if (isSaving || isSyncing) return;
-            const openModals = document.querySelectorAll('div[id^="modal-"]:not(.hidden)');
-            if (openModals.length > 0) return;
+            if (opsInFlight > 0 || isSyncing || sessionExpiredHandled) return;
+            if (!force && document.querySelectorAll('div[id^="modal-"]:not(.hidden)').length > 0) return;
 
+            const versionAtStart = stateVersion;
             try {
                 isSyncing = true;
-                const response = await fetch('api.php?action=get_all', { cache: 'no-store' });
-                const json = await response.json();
-                if (json.success && json.data) {
-                    appState.products = Array.isArray(json.data.products) ? json.data.products : [];
-                    appState.slots = (json.data.slots && typeof json.data.slots === 'object') ? json.data.slots : {};
-                    appState.unallocatedLots = Array.isArray(json.data.unallocatedLots) ? json.data.unallocatedLots : [];
-                    appState.customSlots = Array.isArray(json.data.customSlots) ? json.data.customSlots : [];
-                    appState.history = Array.isArray(json.data.history) ? json.data.history : [];
-                    renderAll();
-                }
+                const json = await apiFetch('get_all');
+                // Uma operação começou durante a leitura: este retrato já está velho
+                if (versionAtStart !== stateVersion || opsInFlight > 0) return;
+                applyServerData(json.data || {});
+                renderAll();
             } catch (err) {
-                // Silencioso no polling
+                // Silencioso no polling (401 já redireciona para o login)
             } finally {
                 isSyncing = false;
             }
         }
 
-        async function saveState() {
-            if (isSaving) return;
-            isSaving = true;
-            updateDbStatusUI('saving', 'Salvando no MySQL...');
-
-            const dirtyKeys = dirtyDocs.size > 0
-                ? [...dirtyDocs]
-                : ['products', 'slots', 'lots', 'history'];
-
-            const payload = {
-                dirtyKeys,
-                products: appState.products,
-                slots: appState.slots,
-                unallocatedLots: appState.unallocatedLots,
-                customSlots: appState.customSlots,
-                history: appState.history
-            };
-
-            try {
-                const response = await fetch('api.php?action=save_state', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload)
-                });
-                const json = await response.json();
-                if (json.success) {
-                    dirtyDocs.clear();
-                    updateDbStatusUI('connected', 'Banco de Dados Salvo (MySQL)');
+        /** Desabilita os botões de envio de um formulário enquanto a operação roda. */
+        function setFormBusy(form, busy) {
+            if (!form) return;
+            form.querySelectorAll('button[type="submit"]').forEach(btn => {
+                if (busy) {
+                    btn.dataset.originalHtml = btn.innerHTML;
+                    btn.disabled = true;
+                    btn.classList.add('opacity-60', 'cursor-wait');
+                    btn.innerHTML = '<span class="inline-block w-3.5 h-3.5 border-2 border-current border-t-transparent rounded-full animate-spin align-[-2px] mr-1.5" aria-hidden="true"></span>Salvando...';
                 } else {
-                    throw new Error(json.error || 'Erro ao persistir no MySQL');
+                    btn.disabled = false;
+                    btn.classList.remove('opacity-60', 'cursor-wait');
+                    if (btn.dataset.originalHtml) btn.innerHTML = btn.dataset.originalHtml;
                 }
+            });
+        }
+
+        /**
+         * Executa uma operação de escrita no servidor.
+         * Retorna a resposta em caso de sucesso, ou null em caso de erro (já notificado).
+         */
+        async function runOperation(action, body = {}, { form = null, successMessage = '', silent = false } = {}) {
+            opsInFlight++;
+            stateVersion++;
+            setFormBusy(form, true);
+            updateDbStatusUI('saving', 'Salvando no MySQL...');
+            try {
+                const json = await apiFetch(action, { method: 'POST', body });
+                if (json.data) {
+                    applyServerData(json.data);
+                    renderAll();
+                }
+                updateDbStatusUI('connected', 'Banco de Dados Salvo (MySQL)');
+                if (!silent) showToast(successMessage || json.message || 'Operação concluída!');
+                return json;
             } catch (err) {
-                console.error('Erro ao salvar no MySQL:', err);
-                updateDbStatusUI('error', 'Erro ao salvar no MySQL');
-                showToast('Erro ao salvar os dados no MySQL: ' + err.message, 'error');
+                if (err.status === 401) return null;
+                const serverDown = err.status === 0 || err.status >= 500;
+                updateDbStatusUI(serverDown ? 'error' : 'connected', serverDown ? 'Erro ao salvar no MySQL' : 'Banco MySQL Conectado');
+                showToast(err.message, 'error');
+                // Dados mudaram em outra aba/usuário: mostra a situação real
+                if ([404, 409].includes(err.status)) {
+                    opsInFlight--;
+                    await pollDatabaseUpdates({ force: true });
+                    opsInFlight++;
+                }
+                return null;
             } finally {
-                isSaving = false;
+                opsInFlight--;
+                setFormBusy(form, false);
             }
         }
 
@@ -1492,92 +1777,20 @@
             openModal('modal-confirm');
         }
 
-        function logMovement(type, productName, slotCode, qtyText, note) {
-            appState.history.unshift({
-                id: 'hist-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
-                timestamp: new Date().toLocaleString('pt-BR'),
-                type,
-                productName,
-                slotCode,
-                qtyText,
-                note: note || '-'
-            });
-            if (appState.history.length > 250) {
-                appState.history = appState.history.slice(0, 250);
-            }
-            markDirty('history');
+        /** Saldo total do produto (posições do mapa + Estoque Geral). */
+        function getProductBalance(productId) {
+            const inSlots = Object.values(appState.slots).filter(s => s?.productId === productId).reduce((sum, s) => sum + (s.qty || 0), 0);
+            const inLots = (appState.unallocatedLots || []).filter(u => u.productId === productId).reduce((sum, u) => sum + (u.qty || 0), 0);
+            return inSlots + inLots;
         }
 
-        function adjustProductQuickQty(productId, delta) {
-            const prod = appState.products.find(p => p.id === productId);
-            if (!prod) return;
-
-            if (delta > 0) {
-                const slotEntry = Object.entries(appState.slots).find(([, s]) => s && s.productId === productId && s.qty > 0);
-                if (slotEntry) {
-                    const [slotCode, slot] = slotEntry;
-                    slot.qty += 1;
-                    markDirty('slots');
-                    logMovement('ENTRADA', prod.name, slotCode, `+1 ${prod.unit}`, 'Ajuste rápido (+) no Resumo Geral');
-                } else {
-                    const uLot = (appState.unallocatedLots || []).find(u => u && u.productId === productId);
-                    if (uLot) {
-                        uLot.qty += 1;
-                    } else {
-                        appState.unallocatedLots.push({
-                            id: 'lot-' + Date.now(),
-                            productId,
-                            qty: 1,
-                            entryDate: todayISO(),
-                            expiryDate: prod.defaultExpiry || '',
-                            observations: prod.observations || ''
-                        });
-                    }
-                    markDirty('lots');
-                    logMovement('ENTRADA', prod.name, 'Geral', `+1 ${prod.unit}`, 'Ajuste rápido (+) no Resumo Geral');
-                }
-                saveState();
-                renderAll();
-                showToast(`+1 ${prod.unit} em "${prod.name}"`);
-                return;
-            }
-
-            // delta < 0: remove 1 unidade seguindo FEFO (lote que vence antes)
-            const candidates = [];
-            Object.entries(appState.slots).forEach(([code, s]) => {
-                if (s && s.productId === productId && s.qty > 0) {
-                    candidates.push({ type: 'slot', code, ref: s, days: getDaysUntilExpiry(s.expiryDate) });
-                }
-            });
-            (appState.unallocatedLots || []).forEach(u => {
-                if (u && u.productId === productId && u.qty > 0) {
-                    candidates.push({ type: 'unallocated', code: 'Geral', ref: u, days: getDaysUntilExpiry(u.expiryDate) });
-                }
-            });
-
-            if (candidates.length === 0) {
+        /** Ajuste rápido ±1 (a saída segue FEFO no servidor). */
+        async function adjustProductQuickQty(productId, delta) {
+            if (delta < 0 && getProductBalance(productId) <= 0) {
                 showToast('Produto já está com saldo zerado.', 'info');
                 return;
             }
-
-            candidates.sort((a, b) => a.days - b.days);
-            const target = candidates[0];
-            target.ref.qty -= 1;
-
-            if (target.type === 'slot') {
-                if (target.ref.qty <= 0) delete appState.slots[target.code];
-                markDirty('slots');
-            } else {
-                if (target.ref.qty <= 0) {
-                    appState.unallocatedLots = appState.unallocatedLots.filter(u => u.qty > 0);
-                }
-                markDirty('lots');
-            }
-
-            logMovement('SAIDA', prod.name, target.code, `-1 ${prod.unit}`, 'Ajuste rápido (−) no Resumo Geral');
-            saveState();
-            renderAll();
-            showToast(`-1 ${prod.unit} em "${prod.name}"`);
+            await runOperation('quick_adjust', { productId, delta: delta > 0 ? 1 : -1 });
         }
 
         // =========================================================================
@@ -1907,6 +2120,7 @@
                     const activeExpDate = nearestLot ? nearestLot.slot.expiryDate : (prod.defaultExpiry || '');
                     const rowStatus = getExpiryStatus(activeExpDate);
                     const safeProdId = escapeHtml(prod.id);
+                    const jsProdId = jsArg(prod.id);
                     const safeProdName = escapeHtml(prod.name);
                     const safeSku = escapeHtml(prod.sku);
                     const safeCat = escapeHtml(prod.category);
@@ -1914,10 +2128,11 @@
                     const locationsHtml = lots.length > 0
                         ? lots.map(l => {
                             const safeCode = escapeHtml(l.slotCode);
+                            const jsCode = jsArg(l.slotCode);
                             if (l.source === 'slot') {
-                                return `<button onclick="jumpToMapSlot('${safeCode}')" class="px-2 py-0.5 rounded text-[11px] font-bold bg-[#0F294A]/10 text-[#0F294A] hover:bg-[#0F294A] hover:text-white transition-colors">${safeCode} (${l.slot.qty})</button>`;
+                                return `<button onclick="jumpToMapSlot(${jsCode})" class="px-2 py-0.5 rounded text-[11px] font-bold bg-[#0F294A]/10 text-[#0F294A] hover:bg-[#0F294A] hover:text-white transition-colors">${safeCode} (${l.slot.qty})</button>`;
                             }
-                            return `<button onclick="openAllocateModal('', '${safeProdId}')" title="Clique para endereçar no Mapa 2D" class="px-2 py-0.5 rounded text-[11px] font-bold bg-slate-200/80 text-slate-700 hover:bg-[#0F294A] hover:text-white transition-colors">Geral (${l.slot.qty})</button>`;
+                            return `<button onclick="openAllocateModal('', ${jsProdId})" title="Clique para endereçar no Mapa 2D" class="px-2 py-0.5 rounded text-[11px] font-bold bg-slate-200/80 text-slate-700 hover:bg-[#0F294A] hover:text-white transition-colors">Geral (${l.slot.qty})</button>`;
                         }).join(' ')
                         : '<span class="text-slate-400 italic">Não alocado</span>';
 
@@ -1952,21 +2167,21 @@
                             </td>
                             <td class="py-3.5 px-4 align-middle text-center">
                                 <div class="inline-flex items-center justify-center bg-white border border-slate-300 rounded-lg shadow-2xs overflow-hidden">
-                                    <button onclick="adjustProductQuickQty('${safeProdId}', -1)" title="Remover 1 unidade" class="px-2.5 py-1 text-slate-600 hover:bg-slate-100 font-bold text-xs">−</button>
+                                    <button onclick="adjustProductQuickQty(${jsProdId}, -1)" title="Remover 1 unidade" class="px-2.5 py-1 text-slate-600 hover:bg-slate-100 font-bold text-xs">−</button>
                                     <span class="px-3 py-1 font-extrabold text-slate-900 min-w-[38px] text-center">${totalQty}</span>
-                                    <button onclick="adjustProductQuickQty('${safeProdId}', 1)" title="Adicionar 1 unidade" class="px-2.5 py-1 text-slate-600 hover:bg-slate-100 font-bold text-xs">+</button>
+                                    <button onclick="adjustProductQuickQty(${jsProdId}, 1)" title="Adicionar 1 unidade" class="px-2.5 py-1 text-slate-600 hover:bg-slate-100 font-bold text-xs">+</button>
                                 </div>
                             </td>
                             <td class="py-3.5 px-4 align-middle text-left text-slate-700 font-medium max-w-[180px] truncate" title="${obsText}">${obsText}</td>
                             <td class="py-3.5 px-4 align-middle text-center">
                                 <div class="inline-flex items-center justify-center gap-1.5 text-slate-600">
-                                    <button onclick="openAllocateModal('', '${safeProdId}')" title="Alocar lote no Mapa 2D" class="p-1.5 rounded-lg bg-white/90 hover:bg-white text-slate-700 hover:text-[#0F294A] border border-slate-300 shadow-2xs transition-all">
+                                    <button onclick="openAllocateModal('', ${jsProdId})" title="Alocar lote no Mapa 2D" class="p-1.5 rounded-lg bg-white/90 hover:bg-white text-slate-700 hover:text-[#0F294A] border border-slate-300 shadow-2xs transition-all">
                                         <i data-lucide="map-pin" class="w-4 h-4"></i>
                                     </button>
-                                    <button onclick="openProductModal('${safeProdId}')" title="Editar produto" class="p-1.5 rounded-lg bg-white/90 hover:bg-white text-slate-700 hover:text-[#0F294A] border border-slate-300 shadow-2xs transition-all">
+                                    <button onclick="openProductModal(${jsProdId})" title="Editar produto" class="p-1.5 rounded-lg bg-white/90 hover:bg-white text-slate-700 hover:text-[#0F294A] border border-slate-300 shadow-2xs transition-all">
                                         <i data-lucide="pencil" class="w-4 h-4"></i>
                                     </button>
-                                    <button onclick="deleteProduct('${safeProdId}')" title="Excluir produto" class="p-1.5 rounded-lg bg-white/90 hover:bg-white text-[#DC2626] border border-slate-300 shadow-2xs transition-all">
+                                    <button onclick="deleteProduct(${jsProdId})" title="Excluir produto" class="admin-only p-1.5 rounded-lg bg-white/90 hover:bg-white text-[#DC2626] border border-slate-300 shadow-2xs transition-all">
                                         <i data-lucide="trash-2" class="w-4 h-4"></i>
                                     </button>
                                 </div>
@@ -1982,6 +2197,7 @@
                     const fallbackImg = getProductFallbackImg(prod.name);
                     const imgSrc = sanitizeUrl(prod.photo) || fallbackImg;
                     const safeProdId = escapeHtml(prod.id);
+                    const jsProdId = jsArg(prod.id);
                     const safeProdName = escapeHtml(prod.name);
                     const safeSku = escapeHtml(prod.sku);
                     const safeUnit = escapeHtml(prod.unit);
@@ -2008,9 +2224,9 @@
                                     <span class="font-bold text-slate-800">${activeExpDate ? escapeHtml(formatDateBR(activeExpDate)) : '—'} (${escapeHtml(cardStatus.daysLabel)})</span>
                                 </div>
                                 <div class="flex items-center gap-1 bg-slate-50 border border-slate-200 rounded-lg">
-                                    <button onclick="adjustProductQuickQty('${safeProdId}', -1)" class="px-2 py-1 font-bold text-slate-600 hover:bg-slate-200 rounded-l-lg">−</button>
+                                    <button onclick="adjustProductQuickQty(${jsProdId}, -1)" class="px-2 py-1 font-bold text-slate-600 hover:bg-slate-200 rounded-l-lg">−</button>
                                     <span class="px-2 font-extrabold text-slate-900">${totalQty} ${safeUnit}</span>
-                                    <button onclick="adjustProductQuickQty('${safeProdId}', 1)" class="px-2 py-1 font-bold text-slate-600 hover:bg-slate-200 rounded-r-lg">+</button>
+                                    <button onclick="adjustProductQuickQty(${jsProdId}, 1)" class="px-2 py-1 font-bold text-slate-600 hover:bg-slate-200 rounded-r-lg">+</button>
                                 </div>
                             </div>
                         </div>`;
@@ -2031,12 +2247,14 @@
 
             const renderFefoRow = (l) => {
                 const safeCode = escapeHtml(l.slotCode);
+                const jsCode = jsArg(l.slotCode);
                 const safeProdId = escapeHtml(l.prod.id);
+                const jsProdId = jsArg(l.prod.id);
                 const safeName = escapeHtml(l.prod.name);
                 const safeUnit = escapeHtml(l.prod.unit);
                 const actionAttr = l.source === 'slot'
-                    ? `onclick="jumpToMapSlot('${safeCode}')"`
-                    : `onclick="openAllocateModal('', '${safeProdId}')"`;
+                    ? `onclick="jumpToMapSlot(${jsCode})"`
+                    : `onclick="openAllocateModal('', ${jsProdId})"`;
                 return `
                 <button type="button" ${actionAttr} class="w-full p-3.5 hover:bg-slate-50 transition-colors flex items-center justify-between gap-3 text-left">
                     <div class="min-w-0">
@@ -2125,7 +2343,7 @@
                                 <td class="py-3 px-4 font-semibold text-slate-600">${minStock} ${safeUnit}</td>
                                 <td class="py-3 px-4">${statusPill}</td>
                                 <td class="py-3 px-4 text-right">
-                                    <button onclick="openAllocateModal('', '${escapeHtml(prod.id)}')" class="px-3 py-1.5 rounded-lg text-xs font-bold bg-[#0F294A] hover:bg-[#183B66] text-white">
+                                    <button onclick="openAllocateModal('', ${jsArg(prod.id)})" class="px-3 py-1.5 rounded-lg text-xs font-bold bg-[#0F294A] hover:bg-[#183B66] text-white">
                                         + Repor
                                     </button>
                                 </td>
@@ -2189,11 +2407,13 @@
                 : '';
 
             const safeCode = escapeHtml(code);
+
+            const jsCode = jsArg(code);
             const safeSubtitle = escapeHtml(subtitle);
 
             if (!isOccupied) {
                 return `
-                    <button type="button" onclick="selectSlot('${safeCode}')" class="group relative rounded-xl border-2 border-dashed border-slate-300 bg-white hover:border-indigo-400 hover:bg-indigo-50/40 p-2 text-left transition-all flex flex-col justify-between ${extraClasses} ${selectedRing} ${filterVisualClass}">
+                    <button type="button" onclick="selectSlot(${jsCode})" class="group relative rounded-xl border-2 border-dashed border-slate-300 bg-white hover:border-indigo-400 hover:bg-indigo-50/40 p-2 text-left transition-all flex flex-col justify-between ${extraClasses} ${selectedRing} ${filterVisualClass}">
                         <div class="flex items-center justify-between w-full">
                             <span class="text-xs font-extrabold text-slate-800 bg-slate-100 group-hover:bg-indigo-100 group-hover:text-indigo-700 px-1.5 py-0.5 rounded-md">${safeCode}</span>
                             <span class="text-[10px] font-medium text-slate-400">Livre</span>
@@ -2203,7 +2423,7 @@
             }
 
             return `
-                <button type="button" onclick="selectSlot('${safeCode}')" class="group relative rounded-xl border-2 p-2 text-left transition-all flex flex-col justify-between ${status.slotBg} ${extraClasses} ${selectedRing} ${filterVisualClass}">
+                <button type="button" onclick="selectSlot(${jsCode})" class="group relative rounded-xl border-2 p-2 text-left transition-all flex flex-col justify-between ${status.slotBg} ${extraClasses} ${selectedRing} ${filterVisualClass}">
                     <div class="flex items-center justify-between w-full gap-1">
                         <span class="text-xs font-extrabold px-1.5 py-0.5 rounded-md bg-black/20 ${status.slotTextMain}">${safeCode}</span>
                         <span class="text-[10px] font-extrabold px-1.5 py-0.5 rounded-md bg-black/20 ${status.slotTextMain}">${slot.qty} ${escapeHtml(prod.unit)}</span>
@@ -2273,6 +2493,8 @@
             selectedSlotCode = def.code;
 
             const safeCode = escapeHtml(def.code);
+
+            const jsCode = jsArg(def.code);
             const safeLabel = escapeHtml(def.label);
             const slot = appState.slots[def.code];
             const prod = slot && slot.productId ? appState.products.find(p => p.id === slot.productId) : null;
@@ -2297,7 +2519,7 @@
                                 <p class="text-xs font-bold text-slate-800">Espaço Livre para Alocação</p>
                                 <p class="text-[11px] text-slate-500 mt-1">Aloque um produto cadastrado nesta posição com quantidade, entrada e validade.</p>
                             </div>
-                            <button onclick="openAllocateModal('${safeCode}')" class="w-full py-2.5 px-4 rounded-xl text-xs font-bold bg-[#0F294A] hover:bg-[#183B66] text-white shadow-sm">
+                            <button onclick="openAllocateModal(${jsCode})" class="w-full py-2.5 px-4 rounded-xl text-xs font-bold bg-[#0F294A] hover:bg-[#183B66] text-white shadow-sm">
                                 + Alocar Produto em ${safeCode}
                             </button>
                         </div>
@@ -2310,6 +2532,7 @@
             const fallbackImg = getProductFallbackImg(prod.name);
             const imgSrc = sanitizeUrl(prod.photo) || fallbackImg;
             const safeProdId = escapeHtml(prod.id);
+            const jsProdId = jsArg(prod.id);
             const safeProdName = escapeHtml(prod.name);
 
             container.innerHTML = `
@@ -2346,7 +2569,7 @@
                                 <span class="text-[10px] font-bold uppercase text-slate-400 block">Data de Vencimento</span>
                                 <span class="text-xs font-extrabold text-slate-900">${escapeHtml(formatDateBR(slot.expiryDate))} <span class="font-semibold text-slate-500">(${escapeHtml(status.label)})</span></span>
                             </div>
-                            <button onclick="openEditExpiryModal('slot', '${safeCode}')" class="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-white hover:bg-indigo-50 text-indigo-600 border border-slate-200">
+                            <button onclick="openEditExpiryModal('slot', ${jsCode})" class="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-white hover:bg-indigo-50 text-indigo-600 border border-slate-200">
                                 Editar
                             </button>
                         </div>
@@ -2354,19 +2577,19 @@
                     </div>
 
                     <div class="grid grid-cols-2 gap-2 pt-2">
-                        <button onclick="openAllocateModal('${safeCode}', '${safeProdId}')" class="py-2.5 px-3 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white flex items-center justify-center gap-1.5">
+                        <button onclick="openAllocateModal(${jsCode}, ${jsProdId})" class="py-2.5 px-3 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white flex items-center justify-center gap-1.5">
                             <i data-lucide="plus" class="w-4 h-4"></i>
                             <span>+ Adicionar</span>
                         </button>
-                        <button onclick="openWithdrawModal('${safeCode}')" class="py-2.5 px-3 rounded-xl text-xs font-bold bg-rose-600 hover:bg-rose-700 text-white flex items-center justify-center gap-1.5">
+                        <button onclick="openWithdrawModal(${jsCode})" class="py-2.5 px-3 rounded-xl text-xs font-bold bg-rose-600 hover:bg-rose-700 text-white flex items-center justify-center gap-1.5">
                             <i data-lucide="minus" class="w-4 h-4"></i>
                             <span>Dar Baixa</span>
                         </button>
-                        <button onclick="openTransferModal('${safeCode}')" class="py-2.5 px-3 rounded-xl text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-800 flex items-center justify-center gap-1.5">
+                        <button onclick="openTransferModal(${jsCode})" class="py-2.5 px-3 rounded-xl text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-800 flex items-center justify-center gap-1.5">
                             <i data-lucide="arrow-right-left" class="w-3.5 h-3.5"></i>
                             <span>Transferir</span>
                         </button>
-                        <button onclick="clearSingleSlot('${safeCode}')" class="py-2.5 px-3 rounded-xl text-xs font-bold bg-slate-100 hover:bg-rose-50 text-slate-600 hover:text-rose-600 flex items-center justify-center gap-1.5">
+                        <button onclick="clearSingleSlot(${jsCode})" class="py-2.5 px-3 rounded-xl text-xs font-bold bg-slate-100 hover:bg-rose-50 text-slate-600 hover:text-rose-600 flex items-center justify-center gap-1.5">
                             <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
                             <span>Esvaziar</span>
                         </button>
@@ -2467,6 +2690,7 @@
                 const expDateToShow = nearestSlot ? nearestSlot.expiryDate : prod.defaultExpiry;
                 const expStatus = expDateToShow ? getExpiryStatus(expDateToShow) : null;
                 const safeProdId = escapeHtml(prod.id);
+                const jsProdId = jsArg(prod.id);
                 const safeProdName = escapeHtml(prod.name);
                 const safeUnit = escapeHtml(prod.unit);
 
@@ -2490,7 +2714,7 @@
                                 <div class="text-right">
                                     <div class="flex items-center justify-end gap-1">
                                         <span class="text-[10px] text-slate-400">${nearestSlot ? `Próx. Venc. (${escapeHtml(nearestSlot.code)})` : 'Validade Padrão'}</span>
-                                        <button onclick="openEditExpiryModal('product', '${safeProdId}')" title="Editar validade padrão" class="text-indigo-600 hover:text-indigo-800">
+                                        <button onclick="openEditExpiryModal('product', ${jsProdId})" title="Editar validade padrão" class="text-indigo-600 hover:text-indigo-800">
                                             <i data-lucide="calendar" class="w-3 h-3"></i>
                                         </button>
                                     </div>
@@ -2502,13 +2726,13 @@
                         </div>
 
                         <div class="flex items-center justify-between gap-1.5 pt-2 border-t border-slate-100">
-                            <button onclick="openAllocateModal('', '${safeProdId}')" class="flex-1 py-2 px-3 rounded-xl text-xs font-bold bg-[#0F294A] hover:bg-[#183B66] text-white">
+                            <button onclick="openAllocateModal('', ${jsProdId})" class="flex-1 py-2 px-3 rounded-xl text-xs font-bold bg-[#0F294A] hover:bg-[#183B66] text-white">
                                 + Alocar
                             </button>
-                            <button onclick="openProductModal('${safeProdId}')" class="p-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700" title="Editar Produto">
+                            <button onclick="openProductModal(${jsProdId})" class="p-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700" title="Editar Produto">
                                 <i data-lucide="pencil" class="w-4 h-4"></i>
                             </button>
-                            <button onclick="deleteProduct('${safeProdId}')" class="p-2 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-600" title="Excluir Produto">
+                            <button onclick="deleteProduct(${jsProdId})" class="admin-only p-2 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-600" title="Excluir Produto">
                                 <i data-lucide="trash-2" class="w-4 h-4"></i>
                             </button>
                         </div>
@@ -2526,7 +2750,7 @@
             const list = appState.history.filter(h => filter === 'all' || h.type === filter);
 
             if (list.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="6" class="py-8 px-4 text-center text-slate-400">Nenhuma movimentação registrada.</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="7" class="py-8 px-4 text-center text-slate-400">Nenhuma movimentação registrada.</td></tr>';
                 return;
             }
 
@@ -2534,7 +2758,11 @@
                 ENTRADA: 'bg-emerald-100 text-emerald-800',
                 SAIDA: 'bg-rose-100 text-rose-800',
                 TRANSFERENCIA: 'bg-sky-100 text-sky-800',
-                VALIDADE: 'bg-amber-100 text-amber-800'
+                VALIDADE: 'bg-amber-100 text-amber-800',
+                CADASTRO: 'bg-indigo-100 text-indigo-800',
+                EDICAO: 'bg-violet-100 text-violet-800',
+                EXCLUSAO: 'bg-red-100 text-red-800',
+                SISTEMA: 'bg-slate-200 text-slate-800'
             };
 
             tbody.innerHTML = list.map(h => `
@@ -2545,16 +2773,14 @@
                     <td class="py-3 px-4 font-extrabold text-indigo-700">${escapeHtml(h.slotCode)}</td>
                     <td class="py-3 px-4 font-semibold text-slate-700">${escapeHtml(h.qtyText)}</td>
                     <td class="py-3 px-4 text-slate-500">${escapeHtml(h.note)}</td>
+                    <td class="py-3 px-4 font-semibold text-slate-700 whitespace-nowrap">${h.user ? '@' + escapeHtml(h.user) : '<span class="text-slate-400">—</span>'}</td>
                 </tr>`).join('');
         }
 
         function clearHistoryLog() {
-            openConfirmDialog('Limpar Histórico', 'Deseja apagar todo o registro de auditoria?', () => {
-                appState.history = [];
-                markDirty('history');
-                saveState();
-                renderHistory();
-                showToast('Histórico limpo com sucesso.');
+            if (!requireAdminAction()) return;
+            openConfirmDialog('Limpar Histórico', 'Deseja apagar todo o registro de auditoria? A limpeza ficará registrada com o seu usuário.', () => {
+                runOperation('clear_history');
             });
         }
 
@@ -2576,7 +2802,159 @@
             'Material de Escritório':   { storage: '', perecivel: false, hint: 'Papel: proteger de umidade. Sem validade de consumo.' },
         };
 
-        function onCategoryChange() {
+        // Classificação automática: palavras-chave (sem acento, minúsculas) → categoria.
+        // A ordem importa: a primeira categoria com palavra encontrada vence.
+        const CATEGORY_KEYWORDS = [
+            ['Laticínios & Ovos', ['leite', 'queijo', 'iogurte', 'manteiga', 'margarina', 'requeijao', 'creme de leite', 'nata', 'ovo', 'ovos', 'mussarela', 'muçarela', 'parmesao', 'ricota', 'coalhada', 'leite condensado']],
+            ['Doces & Chocolates', ['chocolate', 'achocolatado', 'cacau', 'doce', 'bala', 'balas', 'bombom', 'goiabada', 'brigadeiro', 'granulado', 'acucar', 'mel', 'geleia', 'biscoito', 'bolacha', 'wafer', 'sobremesa', 'gelatina', 'pudim', 'cobertura', 'confeito', 'paçoca', 'pacoca']],
+            ['Bebidas', ['suco', 'refrigerante', 'agua mineral', 'agua', 'cafe', 'cha', 'cerveja', 'vinho', 'refresco', 'energetico', 'isotonico', 'bebida', 'guarana', 'coca', 'nectar', 'xarope']],
+            ['Grãos & Cereais', ['feijao', 'arroz', 'lentilha', 'grao de bico', 'grao', 'graos', 'ervilha seca', 'milho', 'pipoca', 'aveia', 'granola', 'cereal', 'cereais', 'soja', 'quinoa', 'linhaca', 'chia', 'cevada', 'trigo em grao', 'canjica', 'amendoim', 'castanha']],
+            ['Farinhas & Amidos', ['farinha', 'fuba', 'amido', 'maisena', 'polvilho', 'tapioca', 'goma', 'fecula', 'farelo', 'massa', 'macarrao', 'espaguete', 'lasanha', 'fermento', 'mistura para bolo', 'empanar', 'rosca']],
+            ['Temperos & Condimentos', ['sal', 'pimenta', 'oregano', 'tempero', 'caldo', 'cominho', 'colorau', 'canela', 'cravo', 'louro', 'paprica', 'curry', 'açafrao', 'acafrao', 'vinagre', 'oleo', 'azeite', 'molho', 'catchup', 'ketchup', 'maionese', 'mostarda', 'shoyu', 'extrato de tomate', 'condimento', 'alho em po', 'noz moscada']],
+            ['Legumes & Verduras', ['tomate', 'cebola', 'alho', 'batata', 'cenoura', 'abobora', 'abobrinha', 'chuchu', 'beterraba', 'pepino', 'pimentao', 'alface', 'couve', 'repolho', 'brocolis', 'espinafre', 'rucula', 'agriao', 'mandioca', 'aipim', 'inhame', 'berinjela', 'quiabo', 'vagem', 'legume', 'legumes', 'verdura', 'verduras', 'salsa', 'cebolinha', 'coentro', 'cheiro verde', 'banana', 'maca', 'laranja', 'limao', 'fruta', 'frutas', 'mamao', 'melancia', 'abacaxi', 'uva', 'morango']],
+            ['Higiene & Limpeza', ['sabao', 'sabonete', 'detergente', 'desinfetante', 'agua sanitaria', 'alvejante', 'cloro', 'alcool', 'amaciante', 'esponja', 'shampoo', 'xampu', 'condicionador', 'creme dental', 'pasta de dente', 'escova', 'papel higienico', 'limpador', 'multiuso', 'lustra moveis', 'vassoura', 'rodo', 'pano', 'flanela', 'luva', 'luvas', 'desengordurante', 'higienizador', 'sanitizante', 'limpeza', 'saco de lixo', 'saco lixo']],
+            ['Descartáveis & Embalagens', ['descartavel', 'descartaveis', 'copo', 'copos', 'prato', 'pratos', 'talher', 'talheres', 'garfo', 'faca', 'colher', 'guardanapo', 'canudo', 'marmitex', 'embalagem', 'embalagens', 'pote', 'potes', 'filme plastico', 'papel aluminio', 'papel manteiga', 'sacola', 'saco', 'sacos', 'bandeja', 'touca', 'mascara', 'isopor', 'tampa', 'papel toalha']],
+            ['Material de Escritório', ['caneta', 'lapis', 'borracha', 'papel a4', 'papel sulfite', 'sulfite', 'caderno', 'grampo', 'grampeador', 'clipe', 'clips', 'pasta', 'envelope', 'fita adesiva', 'durex', 'tesoura', 'cola', 'marca texto', 'pincel', 'post it', 'bloco de notas', 'etiqueta', 'toner', 'cartucho', 'regua', 'calculadora', 'escritorio']],
+        ];
+
+        function normalizeForMatch(text) {
+            return ' ' + String(text || '').toLowerCase()
+                .normalize('NFD').replace(/[̀-ͯ]/g, '')
+                .replace(/[^a-z0-9]+/g, ' ').trim() + ' ';
+        }
+
+        const CATEGORY_KEYWORDS_NORM = CATEGORY_KEYWORDS.map(([cat, words]) =>
+            [cat, words.map(w => normalizeForMatch(w))]);
+
+        // Retorna a categoria sugerida para o nome do produto, ou '' se nenhuma regra casar.
+        // Vence a palavra-chave que aparece primeiro no nome (o substantivo principal em pt-BR:
+        // "Suco de laranja" → Bebidas, "Farinha de milho" → Farinhas); no empate, a mais longa
+        // ("creme dental" antes de "creme").
+        function classifyProductCategory(name) {
+            const text = normalizeForMatch(name);
+            if (text.trim() === '') return '';
+            let best = '', bestPos = Infinity, bestLen = 0;
+            for (const [cat, words] of CATEGORY_KEYWORDS_NORM) {
+                for (const w of words) {
+                    // casa palavra inteira, aceitando plural simples ("ovos", "copos")
+                    let pos = text.indexOf(w);
+                    if (pos < 0) pos = text.indexOf(w.replace(/ $/, 's '));
+                    if (pos < 0) continue;
+                    if (pos < bestPos || (pos === bestPos && w.length > bestLen)) {
+                        best = cat; bestPos = pos; bestLen = w.length;
+                    }
+                }
+            }
+            return best;
+        }
+
+        // ---------------------------------------------------------------------
+        // Aprendizado com o catálogo: usa as categorias que as pessoas já escolheram
+        // para produtos parecidos. Produtos em "Geral" não ensinam nada (são os sem categoria).
+        // ---------------------------------------------------------------------
+        const NAME_STOPWORDS = new Set(['de', 'da', 'do', 'das', 'dos', 'com', 'sem', 'para', 'em', 'e', 'a', 'o', 'tipo',
+            'kg', 'g', 'gr', 'mg', 'l', 'lt', 'ml', 'un', 'und', 'unid', 'cx', 'pct', 'pc', 'fd', 'm', 'cm', 'mm']);
+
+        // Palavras relevantes do nome, na ordem: "Feijão Carioca 1kg" → ['feijao', 'carioca']
+        function nameTokens(name) {
+            return normalizeForMatch(name).trim().split(' ')
+                .filter(t => t.length >= 2 && !/^\d/.test(t) && !NAME_STOPWORDS.has(t))
+                .map(t => (t.length > 3 && t.endsWith('s')) ? t.slice(0, -1) : t); // plural simples
+        }
+
+        function buildCatalogIndex(excludeId = '') {
+            const exact = new Map();   // nome completo → categoria
+            const head = new Map();    // 1ª palavra → {categoria: [nomes]}
+            const any = new Map();     // qualquer palavra → {categoria: quantidade}
+            for (const p of appState.products || []) {
+                const cat = String(p.category || '').trim();
+                if (!cat || cat === 'Geral' || cat === 'Outra' || p.id === excludeId) continue;
+                const toks = nameTokens(p.name);
+                if (toks.length === 0) continue;
+                exact.set(toks.join(' '), { cat, from: p.name });
+                const h = head.get(toks[0]) || {};
+                (h[cat] = h[cat] || []).push(p.name);
+                head.set(toks[0], h);
+                for (const t of new Set(toks)) {
+                    const a = any.get(t) || {};
+                    a[cat] = (a[cat] || 0) + 1;
+                    any.set(t, a);
+                }
+            }
+            return { exact, head, any };
+        }
+
+        // Categoria majoritária de um contador, se dominar (≥ 70%) — evita palpites em palavras ambíguas.
+        function dominantCategory(counts) {
+            const entries = Object.entries(counts).map(([c, v]) => [c, Array.isArray(v) ? v.length : v]);
+            const total = entries.reduce((s, [, n]) => s + n, 0);
+            entries.sort((x, y) => y[1] - x[1]);
+            return (entries.length && entries[0][1] / total >= 0.7) ? entries[0][0] : '';
+        }
+
+        // Sugere a categoria de um nome. Ordem de confiança:
+        //  1. mesmo nome já cadastrado; 2. mesma palavra principal (1ª palavra) no catálogo;
+        //  3. lista de palavras-chave; 4. outras palavras em comum com o catálogo; 5. "Geral".
+        // Retorna { category, reason } (reason explica a origem para mostrar na tela).
+        function suggestCategory(name, { excludeId = '', index = null } = {}) {
+            const toks = nameTokens(name);
+            if (toks.length === 0) return { category: 'Geral', reason: '' };
+            const idx = index || buildCatalogIndex(excludeId);
+
+            const ex = idx.exact.get(toks.join(' '));
+            if (ex) return { category: ex.cat, reason: `igual a "${ex.from}" já cadastrado` };
+
+            const h = idx.head.get(toks[0]);
+            if (h) {
+                const cat = dominantCategory(h);
+                if (cat) return { category: cat, reason: `parecido com "${h[cat][0]}" já cadastrado` };
+            }
+
+            const kw = classifyProductCategory(name);
+            if (kw) return { category: kw, reason: 'pelas palavras do nome' };
+
+            const score = {};
+            toks.forEach((t, i) => {
+                const a = idx.any.get(t);
+                const cat = a && dominantCategory(a);
+                if (cat) score[cat] = (score[cat] || 0) + 1 / (i + 1); // palavras do início pesam mais
+            });
+            const bestLearned = Object.entries(score).sort((x, y) => y[1] - x[1])[0];
+            if (bestLearned) return { category: bestLearned[0], reason: 'pelo histórico de produtos parecidos' };
+
+            return { category: 'Geral', reason: 'nenhuma categoria clara' };
+        }
+
+        // Ao digitar o nome, escolhe a categoria sozinho — a menos que o usuário já tenha escolhido manualmente.
+        function onProductNameInput() {
+            const catSelect = document.getElementById('prod-category');
+            const autoNote = document.getElementById('prod-category-auto');
+            if (catSelect.dataset.userEdited) return;
+            const name = document.getElementById('prod-name').value.trim();
+            // Campo vazio volta para "Selecione".
+            const sug = name ? suggestCategory(name, { excludeId: document.getElementById('prod-id').value })
+                             : { category: '', reason: '' };
+            if (autoNote) {
+                autoNote.textContent = sug.category ? `Categoria automática: ${sug.reason}.` : '';
+                autoNote.classList.toggle('hidden', !sug.category);
+            }
+
+            const known = Array.from(catSelect.options).some(o => o.value === sug.category && o.value !== 'Outra');
+            const customInput = document.getElementById('prod-custom-category');
+            if (known || !sug.category) {
+                if (catSelect.value === sug.category) return;
+                catSelect.value = sug.category;
+                onCategoryChange({ auto: true });
+            } else {
+                // Categoria personalizada aprendida do catálogo (ex.: "Ferragens")
+                if (catSelect.value === 'Outra' && customInput.value === sug.category) return;
+                catSelect.value = 'Outra';
+                onCategoryChange({ auto: true });
+                customInput.value = sug.category;
+            }
+        }
+
+        function onCategoryChange({ auto = false } = {}) {
             const catSelect = document.getElementById('prod-category');
             const customWrap = document.getElementById('prod-custom-category-wrap');
             const customInput = document.getElementById('prod-custom-category');
@@ -2590,7 +2968,7 @@
             customWrap.classList.toggle('hidden', !isCustom);
             if (isCustom) {
                 customInput.required = true;
-                customInput.focus();
+                if (!auto) customInput.focus(); // não rouba o foco de quem está digitando o nome
             } else {
                 customInput.required = false;
                 customInput.value = '';
@@ -2670,6 +3048,9 @@
             const obsEl = document.getElementById('prod-observations');
             if (obsEl) obsEl.value = prod ? (prod.observations || '') : '';
             document.getElementById('prod-category-hint').classList.add('hidden');
+            const autoNote = document.getElementById('prod-category-auto');
+            autoNote.textContent = '';
+            autoNote.classList.add('hidden');
 
             // Preview de validade
             const expiryInput = document.getElementById('prod-default-expiry');
@@ -2683,6 +3064,8 @@
             const storageEl = document.getElementById('prod-storage');
             storageEl.onchange = () => { storageEl.dataset.userEdited = '1'; };
 
+            // Na edição, a categoria salva é respeitada; em novo produto, ela segue o nome digitado.
+            catSelect.dataset.userEdited = prod ? '1' : '';
             if (!prod) {
                 // Para novo produto, sugere SKU só depois de escolher categoria
                 catSelect.value = '';
@@ -2691,8 +3074,9 @@
             openModal('modal-product');
         }
 
-        function saveProductForm(e) {
+        async function saveProductForm(e) {
             e.preventDefault();
+            const form = e.target;
             const id = document.getElementById('prod-id').value;
             const catSelect = document.getElementById('prod-category');
             const rawCat = catSelect.value;
@@ -2705,53 +3089,51 @@
             const flagEpi = document.getElementById('prod-flag-epi').checked;
             const flagControlado = document.getElementById('prod-flag-controlado').checked;
 
+            const minRaw = document.getElementById('prod-min-stock').value.trim();
+            const maxRaw = document.getElementById('prod-max-stock').value.trim();
             const data = {
-                id: id || ('prod-' + Date.now()),
+                id,
                 name: document.getElementById('prod-name').value.trim(),
                 sku: document.getElementById('prod-sku').value.trim().toUpperCase(),
                 category: finalCategory,
                 unit: document.getElementById('prod-unit').value,
-                minStock: parseInt(document.getElementById('prod-min-stock').value, 10) || 0,
-                maxStock: parseInt(document.getElementById('prod-max-stock').value, 10) || 0,
+                minStock: minRaw === '' ? 0 : Number(minRaw),
+                maxStock: maxRaw === '' ? null : Number(maxRaw),
                 defaultExpiry: document.getElementById('prod-default-expiry').value || '',
                 storage: document.getElementById('prod-storage').value || '',
                 flagPerecivel,
                 flagEpi,
                 flagControlado,
-                photo: '',
                 observations: (document.getElementById('prod-observations')?.value || '').trim()
             };
 
-            if (id) {
-                const idx = appState.products.findIndex(p => p.id === id);
-                if (idx >= 0) appState.products[idx] = data;
-                showToast('Produto atualizado!');
-            } else {
-                appState.products.push(data);
-                showToast(`"${data.name}" cadastrado com sucesso!`);
-            }
+            // Validação imediata (o servidor valida tudo novamente)
+            const fail = (msg, fieldId) => {
+                showToast(msg, 'error');
+                if (fieldId) document.getElementById(fieldId)?.focus();
+            };
+            if (data.name.length < 2) return fail('Informe o nome do produto (mínimo 2 caracteres).', 'prod-name');
+            if (!data.sku) return fail('Informe o SKU do produto.', 'prod-sku');
+            if (!/^[A-Z0-9][A-Z0-9._\/-]{0,31}$/.test(data.sku)) return fail('SKU inválido: use letras, números, ponto, hífen, barra ou sublinhado (até 32).', 'prod-sku');
+            const skuOwner = appState.products.find(p => p.id !== id && String(p.sku).toUpperCase() === data.sku);
+            if (skuOwner) return fail(`O SKU ${data.sku} já está em uso pelo produto "${skuOwner.name}".`, 'prod-sku');
+            if (!data.category) return fail('Selecione a categoria do produto.', 'prod-category');
+            if (!Number.isInteger(data.minStock) || data.minStock < 0) return fail('O estoque mínimo deve ser um número inteiro maior ou igual a zero.', 'prod-min-stock');
+            if (data.maxStock !== null && (!Number.isInteger(data.maxStock) || data.maxStock < 1)) return fail('O estoque máximo deve ser um número inteiro maior que zero (ou deixe em branco).', 'prod-max-stock');
+            if (data.maxStock !== null && data.maxStock < data.minStock) return fail('O estoque máximo não pode ser menor que o estoque mínimo.', 'prod-max-stock');
 
-            markDirty('products');
-            saveState();
-            closeModal('modal-product');
-            renderAll();
+            const ok = await runOperation('product_save', data, { form });
+            if (ok) closeModal('modal-product');
         }
 
         function deleteProduct(productId) {
+            if (!requireAdminAction()) return;
             const prod = appState.products.find(p => p.id === productId);
             if (!prod) return;
-            openConfirmDialog('Excluir Produto', `Remover "${prod.name}" do catálogo e do estoque?`, () => {
-                appState.products = appState.products.filter(p => p.id !== productId);
-                Object.keys(appState.slots).forEach(code => {
-                    if (appState.slots[code]?.productId === productId) {
-                        delete appState.slots[code];
-                    }
-                });
-                appState.unallocatedLots = (appState.unallocatedLots || []).filter(u => u.productId !== productId);
-                markDirty('products', 'slots', 'lots');
-                saveState();
-                renderAll();
-                showToast('Produto excluído.');
+            const balance = getProductBalance(productId);
+            const extra = balance > 0 ? ` O saldo atual de ${balance} ${prod.unit} também será removido.` : '';
+            openConfirmDialog('Excluir Produto', `Remover "${prod.name}" do catálogo e do estoque?${extra}`, () => {
+                runOperation('product_delete', { id: productId });
             });
         }
 
@@ -2808,77 +3190,40 @@
             el.textContent = st.label;
         }
 
-        function moveSlotToUnallocated(slotCode) {
-            const oldSlot = appState.slots[slotCode];
-            if (!oldSlot || !oldSlot.productId || oldSlot.qty <= 0) return null;
-            const oldProd = appState.products.find(p => p.id === oldSlot.productId);
-            appState.unallocatedLots.push({
-                id: 'lot-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
-                productId: oldSlot.productId,
-                qty: oldSlot.qty,
-                entryDate: oldSlot.entryDate || todayISO(),
-                expiryDate: oldSlot.expiryDate || '',
-                observations: oldSlot.observations || oldSlot.lot || ''
-            });
-            markDirty('lots');
-            if (oldProd) {
-                logMovement('TRANSFERENCIA', oldProd.name, `${slotCode} → Geral`, `${oldSlot.qty} ${oldProd.unit}`, 'Movido para Estoque Geral ao realocar posição');
-            }
-            return oldProd;
+        /** Lê uma quantidade inteira positiva de um campo; retorna null se inválida. */
+        function readPositiveInt(inputId) {
+            const raw = String(document.getElementById(inputId).value).trim();
+            if (!/^\d+$/.test(raw)) return null;
+            const n = Number(raw);
+            return n >= 1 && n <= 1000000 ? n : null;
         }
 
-        function commitAllocate(productId, slotCode, qty, entryDate, expiryDate, lot) {
-            const prod = appState.products.find(p => p.id === productId);
-            if (!prod) return;
-
-            let remainingToDeduct = qty;
-            (appState.unallocatedLots || []).forEach(uLot => {
-                if (remainingToDeduct <= 0 || uLot.productId !== productId || uLot.qty <= 0) return;
-                const take = Math.min(uLot.qty, remainingToDeduct);
-                uLot.qty -= take;
-                remainingToDeduct -= take;
-                markDirty('lots');
-            });
-            appState.unallocatedLots = (appState.unallocatedLots || []).filter(u => u.qty > 0);
-
-            const existing = appState.slots[slotCode];
-            if (existing && existing.productId === productId) {
-                existing.qty += qty;
-                existing.entryDate = entryDate;
-                existing.expiryDate = expiryDate;
-                if (lot) existing.lot = lot;
-            } else {
-                if (existing && existing.productId && existing.qty > 0) {
-                    moveSlotToUnallocated(slotCode);
-                }
-                appState.slots[slotCode] = {
-                    productId,
-                    qty,
-                    entryDate,
-                    expiryDate,
-                    lot,
-                    observations: prod.observations || ''
-                };
+        async function commitAllocate(form, payload) {
+            const ok = await runOperation('stock_allocate', payload, { form });
+            if (ok) {
+                selectedSlotCode = payload.slotCode;
+                closeModal('modal-allocate');
+                renderAll();
             }
-
-            selectedSlotCode = slotCode;
-            markDirty('slots');
-            logMovement('ENTRADA', prod.name, slotCode, `+${qty} ${prod.unit}`, `Validade: ${formatDateBR(expiryDate)}${lot ? ' • Lote: ' + lot : ''}`);
-            saveState();
-            closeModal('modal-allocate');
-            renderAll();
-            showToast(`${qty} ${prod.unit} alocado(s) em ${slotCode}!`);
         }
 
         function saveAllocateForm(e) {
             e.preventDefault();
+            const form = e.target;
             const productId = document.getElementById('alloc-product').value;
             const slotCode = document.getElementById('alloc-slot').value;
-            const qty = parseInt(document.getElementById('alloc-qty').value, 10) || 1;
+            const qty = readPositiveInt('alloc-qty');
             const entryDate = document.getElementById('alloc-entry').value;
             const expiryDate = document.getElementById('alloc-expiry').value;
             const lot = document.getElementById('alloc-lot').value.trim();
 
+            if (!productId || !slotCode) return showToast('Selecione o produto e a posição.', 'error');
+            if (qty === null) return showToast('Informe uma quantidade inteira entre 1 e 1.000.000.', 'error');
+            if (expiryDate && entryDate && expiryDate < entryDate) {
+                showToast('Atenção: a validade informada é anterior à data de entrada.', 'info');
+            }
+
+            const payload = { productId, slotCode, qty, entryDate, expiryDate, lot, displace: false };
             const existing = appState.slots[slotCode];
             if (existing && existing.productId && existing.productId !== productId && existing.qty > 0) {
                 const occProd = appState.products.find(p => p.id === existing.productId);
@@ -2886,12 +3231,12 @@
                 openConfirmDialog(
                     'Posição Ocupada',
                     `A posição ${slotCode} já está ocupada por "${occName}" (${existing.qty} ${occProd?.unit || 'un'}). Deseja movê-lo para o Estoque Geral e alocar o novo item aqui?`,
-                    () => commitAllocate(productId, slotCode, qty, entryDate, expiryDate, lot)
+                    () => commitAllocate(form, { ...payload, displace: true })
                 );
                 return;
             }
 
-            commitAllocate(productId, slotCode, qty, entryDate, expiryDate, lot);
+            commitAllocate(form, payload);
         }
 
         function openWithdrawModal(slotCode) {
@@ -2909,28 +3254,28 @@
             openModal('modal-withdraw');
         }
 
-        function saveWithdrawForm(e) {
+        async function saveWithdrawForm(e) {
             e.preventDefault();
             const slotCode = document.getElementById('withdraw-slot').value;
-            const qty = parseInt(document.getElementById('withdraw-qty').value, 10) || 1;
+            const qty = readPositiveInt('withdraw-qty');
             const note = document.getElementById('withdraw-note').value.trim();
 
             const slot = appState.slots[slotCode];
             const prod = slot ? appState.products.find(p => p.id === slot.productId) : null;
-            if (!slot || !prod) return;
-
-            if (qty >= slot.qty) {
-                delete appState.slots[slotCode];
-            } else {
-                slot.qty -= qty;
+            if (!slot || !prod) {
+                showToast(`A posição ${slotCode} já está vazia.`, 'error');
+                closeModal('modal-withdraw');
+                return;
+            }
+            if (qty === null) return showToast('Informe uma quantidade inteira maior que zero.', 'error');
+            if (qty > slot.qty) {
+                showToast(`Quantidade maior que o saldo da posição (${slot.qty} ${prod.unit}).`, 'error');
+                document.getElementById('withdraw-qty').focus();
+                return;
             }
 
-            markDirty('slots');
-            logMovement('SAIDA', prod.name, slotCode, `-${qty} ${prod.unit}`, note || 'Baixa manual');
-            saveState();
-            closeModal('modal-withdraw');
-            renderAll();
-            showToast(`Baixa de ${qty} ${prod.unit} registrada!`);
+            const ok = await runOperation('stock_withdraw', { slotCode, qty, note }, { form: e.target });
+            if (ok) closeModal('modal-withdraw');
         }
 
         function openTransferModal(fromSlotCode) {
@@ -2957,52 +3302,38 @@
             openModal('modal-transfer');
         }
 
-        function commitTransfer(fromCode, toCode, qty) {
-            const src = appState.slots[fromCode];
-            const prod = src ? appState.products.find(p => p.id === src.productId) : null;
-            if (!src || !prod) return;
-
-            const dest = appState.slots[toCode];
-            if (dest && dest.productId === src.productId) {
-                dest.qty += qty;
-            } else {
-                if (dest && dest.productId && dest.qty > 0) {
-                    moveSlotToUnallocated(toCode);
-                }
-                appState.slots[toCode] = {
-                    productId: src.productId,
-                    qty,
-                    entryDate: src.entryDate,
-                    expiryDate: src.expiryDate,
-                    lot: src.lot,
-                    observations: src.observations || ''
-                };
+        async function commitTransfer(form, payload) {
+            const ok = await runOperation('stock_transfer', payload, { form });
+            if (ok) {
+                selectedSlotCode = payload.toCode;
+                closeModal('modal-transfer');
+                renderAll();
             }
-
-            if (qty >= src.qty) {
-                delete appState.slots[fromCode];
-            } else {
-                src.qty -= qty;
-            }
-
-            selectedSlotCode = toCode;
-            markDirty('slots');
-            logMovement('TRANSFERENCIA', prod.name, `${fromCode} → ${toCode}`, `${qty} ${prod.unit}`, 'Remanejamento interno');
-            saveState();
-            closeModal('modal-transfer');
-            renderAll();
-            showToast(`Transferido para ${toCode}!`);
         }
 
         function saveTransferForm(e) {
             e.preventDefault();
+            const form = e.target;
             const fromCode = document.getElementById('transfer-from-slot').value;
             const toCode = document.getElementById('transfer-to-slot').value;
-            const qty = parseInt(document.getElementById('transfer-qty').value, 10) || 1;
+            const qty = readPositiveInt('transfer-qty');
 
             const src = appState.slots[fromCode];
-            if (!src) return;
+            const prod = src ? appState.products.find(p => p.id === src.productId) : null;
+            if (!src || !prod) {
+                showToast(`A posição ${fromCode} já está vazia.`, 'error');
+                closeModal('modal-transfer');
+                return;
+            }
+            if (!toCode || toCode === fromCode) return showToast('Escolha uma posição de destino diferente da origem.', 'error');
+            if (qty === null) return showToast('Informe uma quantidade inteira maior que zero.', 'error');
+            if (qty > src.qty) {
+                showToast(`Quantidade maior que o disponível na origem (${src.qty} ${prod.unit}).`, 'error');
+                document.getElementById('transfer-qty').focus();
+                return;
+            }
 
+            const payload = { fromCode, toCode, qty, displace: false };
             const dest = appState.slots[toCode];
             if (dest && dest.productId && dest.productId !== src.productId && dest.qty > 0) {
                 const occProd = appState.products.find(p => p.id === dest.productId);
@@ -3010,26 +3341,21 @@
                 openConfirmDialog(
                     'Destino Ocupado',
                     `A posição ${toCode} já contém "${occName}" (${dest.qty} ${occProd?.unit || 'un'}). Deseja movê-lo para o Estoque Geral e concluir a transferência?`,
-                    () => commitTransfer(fromCode, toCode, qty)
+                    () => commitTransfer(form, { ...payload, displace: true })
                 );
                 return;
             }
 
-            commitTransfer(fromCode, toCode, qty);
+            commitTransfer(form, payload);
         }
 
         function clearSingleSlot(slotCode) {
             const slot = appState.slots[slotCode];
             const prod = slot ? appState.products.find(p => p.id === slot.productId) : null;
-            openConfirmDialog('Esvaziar Posição', `Remover todo o saldo da posição ${slotCode}?`, () => {
-                if (slot && prod) {
-                    logMovement('SAIDA', prod.name, slotCode, `-${slot.qty} ${prod.unit}`, 'Posição esvaziada');
-                }
-                delete appState.slots[slotCode];
-                markDirty('slots');
-                saveState();
-                renderAll();
-                showToast(`Posição ${slotCode} liberada.`);
+            if (!slot) return showToast(`A posição ${slotCode} já está vazia.`, 'info');
+            const detail = prod ? ` (${slot.qty} ${prod.unit} de "${prod.name}")` : '';
+            openConfirmDialog('Esvaziar Posição', `Dar baixa em todo o saldo da posição ${slotCode}${detail}?`, () => {
+                runOperation('slot_clear', { slotCode });
             });
         }
 
@@ -3051,38 +3377,20 @@
             openModal('modal-edit-expiry');
         }
 
-        function saveEditExpiryForm(e) {
+        async function saveEditExpiryForm(e) {
             e.preventDefault();
-            const type = document.getElementById('edit-expiry-target-type').value;
+            const targetType = document.getElementById('edit-expiry-target-type').value;
             const id = document.getElementById('edit-expiry-target-id').value;
-            const newDate = document.getElementById('edit-expiry-date').value;
+            const date = document.getElementById('edit-expiry-date').value;
 
-            if (type === 'slot') {
-                const slot = appState.slots[id];
-                const prod = slot ? appState.products.find(p => p.id === slot.productId) : null;
-                if (slot) {
-                    slot.expiryDate = newDate;
-                    markDirty('slots');
-                    if (prod) {
-                        logMovement('VALIDADE', prod.name, id, `${slot.qty} ${prod.unit}`, `Nova validade: ${formatDateBR(newDate)}`);
-                    }
-                }
-            } else {
-                const prod = appState.products.find(p => p.id === id);
-                if (prod) {
-                    prod.defaultExpiry = newDate;
-                    markDirty('products');
-                    logMovement('VALIDADE', prod.name, '-', '-', `Validade padrão: ${formatDateBR(newDate)}`);
-                }
-            }
+            if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return showToast('Informe uma data de validade válida.', 'error');
 
-            saveState();
-            closeModal('modal-edit-expiry');
-            renderAll();
-            showToast('Data de validade atualizada!');
+            const ok = await runOperation('expiry_update', { targetType, id, date }, { form: e.target });
+            if (ok) closeModal('modal-edit-expiry');
         }
 
         function openLayoutConfigModal() {
+            if (!requireAdminAction()) return;
             renderCustomSlotsList();
             openModal('modal-layout-config');
         }
@@ -3097,64 +3405,66 @@
             listEl.innerHTML = appState.customSlots.map(s => `
                 <div class="flex items-center justify-between p-2 rounded-xl bg-slate-50 border border-slate-200 text-xs">
                     <span><strong>${escapeHtml(s.code)}</strong> — ${escapeHtml(s.label)}</span>
-                    <button onclick="removeCustomSlot('${escapeHtml(s.code)}')" class="text-rose-600 hover:underline font-semibold">Remover</button>
+                    <button onclick="removeCustomSlot(${jsArg(s.code)})" class="text-rose-600 hover:underline font-semibold">Remover</button>
                 </div>`).join('');
         }
 
-        function addCustomSlot(e) {
+        async function addCustomSlot(e) {
             e.preventDefault();
-            const code = document.getElementById('new-custom-slot-code').value.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '');
+            if (!requireAdminAction()) return;
+            const rawCode = document.getElementById('new-custom-slot-code').value.trim().toUpperCase();
             const label = document.getElementById('new-custom-slot-label').value.trim();
-            if (!code || !label) return;
-
-            if (getAllSlotDefinitions().some(d => d.code === code)) {
-                showToast('Já existe uma posição com esse código.', 'error');
-                return;
+            if (!/^[A-Z0-9_-]{1,6}$/.test(rawCode)) {
+                return showToast('Código inválido: use até 6 letras, números, hífen ou sublinhado.', 'error');
+            }
+            if (!label) return showToast('Informe a descrição da posição.', 'error');
+            if (getAllSlotDefinitions().some(d => d.code === rawCode)) {
+                return showToast('Já existe uma posição com esse código.', 'error');
             }
 
-            appState.customSlots.push({ code, label });
-            document.getElementById('new-custom-slot-code').value = '';
-            document.getElementById('new-custom-slot-label').value = '';
-            markDirty('slots');
-            saveState();
-            renderCustomSlotsList();
-            renderAll();
-            showToast(`Posição ${code} adicionada ao mapa!`);
+            const ok = await runOperation('custom_slot_add', { code: rawCode, label }, { form: e.target });
+            if (ok) {
+                document.getElementById('new-custom-slot-code').value = '';
+                document.getElementById('new-custom-slot-label').value = '';
+                renderCustomSlotsList();
+            }
         }
 
         function removeCustomSlot(code) {
-            appState.customSlots = appState.customSlots.filter(s => s.code !== code);
-            delete appState.slots[code];
-            markDirty('slots');
-            saveState();
-            renderCustomSlotsList();
-            renderAll();
-            showToast(`Posição ${code} removida.`);
+            if (!requireAdminAction()) return;
+            const run = async () => {
+                const ok = await runOperation('custom_slot_remove', { code });
+                if (ok) {
+                    renderCustomSlotsList();
+                    openModal('modal-layout-config');
+                }
+            };
+            const slot = appState.slots[code];
+            if (slot && slot.qty > 0) {
+                const prod = appState.products.find(p => p.id === slot.productId);
+                closeModal('modal-layout-config');
+                openConfirmDialog('Remover Posição', `A posição ${code} contém ${slot.qty} ${prod?.unit || 'un'} de "${prod?.name || 'produto'}". O saldo será movido para o Estoque Geral. Continuar?`, run);
+                return;
+            }
+            run();
         }
 
         function confirmResetAllSlots() {
+            if (!requireAdminAction()) return;
             closeModal('modal-layout-config');
-            openConfirmDialog('Esvaziar Mapa 2D', 'Isso removerá todos os itens alocados nas prateleiras (mantendo os produtos cadastrados). Continuar?', () => {
-                appState.slots = {};
-                markDirty('slots');
-                logMovement('SAIDA', 'Todas as posições', 'MAPA', '-', 'Limpeza geral do mapa 2D');
-                saveState();
-                renderAll();
-                showToast('Todas as posições do mapa foram liberadas.');
+            openConfirmDialog('Esvaziar Mapa 2D', 'Isso dará baixa em TODOS os itens alocados nas prateleiras (os produtos cadastrados e o Estoque Geral são mantidos). Continuar?', () => {
+                runOperation('slots_reset_all');
             });
         }
 
         function confirmClearAllData() {
+            if (!requireAdminAction()) return;
             openConfirmDialog(
                 'Limpar Todos os Dados',
-                'Deseja apagar TODOS os produtos, posições do Mapa 2D, lotes e histórico salvos no banco de dados? O programa ficará completamente zerado.',
+                'Deseja apagar TODOS os produtos, posições do Mapa 2D, lotes e histórico salvos no banco de dados? O programa ficará completamente zerado. (Os usuários são mantidos.)',
                 async () => {
-                    appState = JSON.parse(JSON.stringify(defaultState));
-                    selectedSlotCode = 'M1';
-                    markDirty('products', 'slots', 'lots', 'history');
-                    await saveState();
-                    renderAll();
-                    showToast('Todos os dados do programa e do banco foram limpos!');
+                    const ok = await runOperation('reset_all');
+                    if (ok) selectedSlotCode = 'M1';
                 }
             );
         }
@@ -3204,6 +3514,7 @@
         function parseRowsMatrixToItems(rowsMatrix, defaultCategory = 'Geral') {
             const items = [];
             if (!Array.isArray(rowsMatrix) || rowsMatrix.length === 0) return items;
+            const catalogIndex = buildCatalogIndex(); // montado uma vez para a planilha inteira
 
             let colMap = { name: 0, category: -1, expiry: -1, qty: -1, unit: -1, slot: -1, obs: -1, sku: -1 };
             let headerRowIndex = -1;
@@ -3272,7 +3583,8 @@
                 items.push({
                     name: nameVal,
                     sku: skuVal,
-                    category: catVal || 'Geral',
+                    // Sem categoria explícita (coluna vazia ou aba genérica): classifica pelo nome
+                    category: (catVal && catVal !== 'Geral') ? catVal : suggestCategory(nameVal, { index: catalogIndex }).category,
                     expiryDate,
                     qty: !isNaN(qtyVal) && qtyVal >= 0 ? qtyVal : 1,
                     unit: unitVal || 'un',
@@ -3602,8 +3914,9 @@
             renderImportPreviewUI(items);
         }
 
-        function executeSpreadsheetImport(e) {
+        async function executeSpreadsheetImport(e) {
             e.preventDefault();
+            const form = e.target;
             if (!parsedSpreadsheetBuffer || parsedSpreadsheetBuffer.length === 0) {
                 previewSpreadsheetImport();
             }
@@ -3614,78 +3927,30 @@
 
             const mode = document.getElementById('import-mode').value;
             const autoAllocate = document.getElementById('import-auto-allocate').checked;
+            if (mode === 'replace' && !requireAdminAction()) return;
+
+            // Toda a lógica de criação de produtos e distribuição roda no servidor (validada e atômica)
+            const items = parsedSpreadsheetBuffer.map(item => ({
+                name: item.name,
+                sku: item.sku || '',
+                category: item.category || 'Geral',
+                unit: item.unit || 'un',
+                qty: Number.isInteger(item.qty) && item.qty >= 0 ? item.qty : 0,
+                expiryDate: item.expiryDate || '',
+                slotCode: item.slotCode || '',
+                observations: item.observations || ''
+            }));
+
+            const run = async () => {
+                const ok = await runOperation('import_items', { items, mode, autoAllocate }, { form });
+                if (ok) closeModal('modal-import-spreadsheet');
+            };
 
             if (mode === 'replace') {
-                appState.products = [];
-                appState.slots = {};
-                appState.unallocatedLots = [];
+                openConfirmDialog('Substituir Estoque', 'O modo "Substituir" apaga TODOS os produtos, posições e lotes atuais antes de importar a planilha. Continuar?', run);
+                return;
             }
-
-            const allSlotCodes = getAllSlotDefinitions().map(s => s.code);
-            let nextFreeSlotIdx = 0;
-
-            parsedSpreadsheetBuffer.forEach((item, idx) => {
-                let prod = appState.products.find(
-                    p => p.name.toLowerCase() === item.name.toLowerCase() && p.category.toLowerCase() === item.category.toLowerCase()
-                );
-
-                if (!prod) {
-                    prod = {
-                        id: 'prod-' + Date.now() + '-' + idx,
-                        name: item.name,
-                        sku: item.sku || `IMP-${String(appState.products.length + 1).padStart(3, '0')}`,
-                        category: item.category || 'Geral',
-                        unit: item.unit || 'un',
-                        minStock: 2,
-                        defaultExpiry: item.expiryDate || '',
-                        photo: '',
-                        observations: item.observations || ''
-                    };
-                    appState.products.push(prod);
-                }
-
-                if (item.qty <= 0) return;
-
-                let targetSlot = '';
-                if (item.slotCode && allSlotCodes.includes(item.slotCode) && !appState.slots[item.slotCode]) {
-                    targetSlot = item.slotCode;
-                } else if (autoAllocate) {
-                    while (nextFreeSlotIdx < allSlotCodes.length && appState.slots[allSlotCodes[nextFreeSlotIdx]]) {
-                        nextFreeSlotIdx++;
-                    }
-                    if (nextFreeSlotIdx < allSlotCodes.length) {
-                        targetSlot = allSlotCodes[nextFreeSlotIdx];
-                        nextFreeSlotIdx++;
-                    }
-                }
-
-                if (targetSlot) {
-                    appState.slots[targetSlot] = {
-                        productId: prod.id,
-                        qty: item.qty,
-                        entryDate: todayISO(),
-                        expiryDate: item.expiryDate || '',
-                        lot: '',
-                        observations: item.observations || ''
-                    };
-                } else {
-                    appState.unallocatedLots.push({
-                        id: 'lot-' + Date.now() + '-' + idx,
-                        productId: prod.id,
-                        qty: item.qty,
-                        entryDate: todayISO(),
-                        expiryDate: item.expiryDate || '',
-                        observations: item.observations || ''
-                    });
-                }
-            });
-
-            markDirty('products', 'slots', 'lots');
-            logMovement('ENTRADA', `Importação Planilha (${parsedSpreadsheetBuffer.length} itens)`, 'GERAL', `${parsedSpreadsheetBuffer.length} lotes`, `Modo: ${mode === 'replace' ? 'Substituição' : 'Mesclagem'}`);
-            saveState();
-            closeModal('modal-import-spreadsheet');
-            renderAll();
-            showToast(`${parsedSpreadsheetBuffer.length} itens importados com sucesso!`);
+            run();
         }
 
         // =========================================================================
@@ -3756,28 +4021,26 @@
         function importJSON(event) {
             const file = event.target.files?.[0];
             if (!file) return;
+            if (!requireAdminAction()) { event.target.value = ''; return; }
             const reader = new FileReader();
             reader.onload = (e) => {
+                let parsed;
                 try {
-                    const parsed = JSON.parse(e.target.result);
-                    if (parsed && Array.isArray(parsed.products)) {
-                        appState = {
-                            products: parsed.products || [],
-                            slots: parsed.slots || {},
-                            unallocatedLots: parsed.unallocatedLots || [],
-                            customSlots: parsed.customSlots || [],
-                            history: parsed.history || []
-                        };
-                        markDirty('products', 'slots', 'lots', 'history');
-                        saveState();
-                        renderAll();
-                        showToast('Backup restaurado com sucesso!');
-                    } else {
-                        showToast('Arquivo JSON inválido.', 'error');
-                    }
+                    parsed = JSON.parse(e.target.result);
                 } catch (err) {
                     showToast('Erro ao ler arquivo JSON.', 'error');
+                    return;
                 }
+                if (!parsed || !Array.isArray(parsed.products)) {
+                    showToast('Arquivo JSON inválido: não é um backup deste sistema.', 'error');
+                    return;
+                }
+                const counts = `${parsed.products.length} produtos`;
+                openConfirmDialog(
+                    'Restaurar Backup',
+                    `Substituir TODOS os produtos, posições e lotes atuais pelo backup "${file.name}" (${counts})? O histórico atual é mantido.`,
+                    () => runOperation('backup_restore', { backup: parsed })
+                );
             };
             reader.readAsText(file);
             event.target.value = '';
@@ -3801,7 +4064,258 @@
             refreshIcons();
         }
 
+        // =========================================================================
+        // CONTA DO USUÁRIO: ALTERAR SENHA
+        // =========================================================================
+
+        function setFormError(elId, message) {
+            const el = document.getElementById(elId);
+            if (!el) return;
+            el.textContent = message || '';
+            el.classList.toggle('hidden', !message);
+        }
+
+        function setButtonBusy(btnId, busy, busyText) {
+            const btn = document.getElementById(btnId);
+            if (!btn) return;
+            if (busy) {
+                btn.dataset.originalText = btn.textContent;
+                btn.textContent = busyText || 'Aguarde...';
+                btn.disabled = true;
+            } else {
+                btn.textContent = btn.dataset.originalText || btn.textContent;
+                btn.disabled = false;
+            }
+        }
+
+        function validateNewPasswordClient(pwd) {
+            if (pwd.length < 8) return 'A nova senha deve ter pelo menos 8 caracteres.';
+            if (!/[A-Za-z]/.test(pwd) || !/\d/.test(pwd)) return 'A nova senha deve conter letras e números.';
+            return '';
+        }
+
+        function openChangePasswordModal() {
+            toggleUserMenu(false);
+            ['cp-current', 'cp-new', 'cp-confirm'].forEach(id => { document.getElementById(id).value = ''; });
+            setFormError('cp-error', '');
+            openModal('modal-change-password');
+            document.getElementById('cp-current').focus();
+        }
+
+        async function saveChangePasswordForm(e) {
+            e.preventDefault();
+            const currentPassword = document.getElementById('cp-current').value;
+            const newPassword = document.getElementById('cp-new').value;
+            const confirmPassword = document.getElementById('cp-confirm').value;
+
+            if (!currentPassword) return setFormError('cp-error', 'Informe a senha atual.');
+            const pwdError = validateNewPasswordClient(newPassword);
+            if (pwdError) return setFormError('cp-error', pwdError);
+            if (newPassword !== confirmPassword) return setFormError('cp-error', 'As novas senhas não conferem.');
+            if (newPassword === currentPassword) return setFormError('cp-error', 'A nova senha deve ser diferente da atual.');
+
+            setFormError('cp-error', '');
+            setButtonBusy('cp-submit', true, 'Salvando...');
+            try {
+                await apiFetch('change_password', { method: 'POST', body: { currentPassword, newPassword } });
+                closeModal('modal-change-password');
+                showToast('Senha alterada com sucesso!');
+            } catch (err) {
+                if (err.status !== 401) setFormError('cp-error', err.message);
+            } finally {
+                setButtonBusy('cp-submit', false);
+            }
+        }
+
+        // =========================================================================
+        // GERENCIAR USUÁRIOS (ADMIN)
+        // =========================================================================
+
+        let usersCache = [];
+
+        async function openUsersModal() {
+            toggleUserMenu(false);
+            if (!requireAdminAction()) return;
+            document.getElementById('users-temp-password').classList.add('hidden');
+            setFormError('nu-error', '');
+            openModal('modal-users');
+            await loadUsers();
+        }
+
+        async function loadUsers() {
+            const listEl = document.getElementById('users-list');
+            listEl.innerHTML = Array.from({ length: 3 }).map(() =>
+                '<div class="h-16 rounded-xl bg-slate-100 animate-pulse"></div>'
+            ).join('');
+            try {
+                const json = await apiFetch('list_users');
+                usersCache = Array.isArray(json.users) ? json.users : [];
+                renderUsersList();
+            } catch (err) {
+                if (err.status === 401) return;
+                listEl.innerHTML = `<p class="text-sm text-red-700 font-semibold py-3">Não foi possível carregar os usuários: ${escapeHtml(err.message)}</p>`;
+            }
+        }
+
+        function formatDateTimeBR(sqlDateTime) {
+            if (!sqlDateTime) return 'nunca';
+            const d = new Date(sqlDateTime.replace(' ', 'T'));
+            return isNaN(d) ? sqlDateTime : d.toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' });
+        }
+
+        function renderUsersList() {
+            const listEl = document.getElementById('users-list');
+            if (usersCache.length === 0) {
+                listEl.innerHTML = '<p class="text-sm text-slate-600 py-3">Nenhum usuário cadastrado.</p>';
+                return;
+            }
+            const meId = window.APP_USER?.id;
+            listEl.innerHTML = usersCache.map(u => {
+                const isMe = u.id === meId;
+                const statusBadges = [
+                    u.active
+                        ? '<span class="px-2 py-0.5 rounded-md text-[11px] font-bold bg-emerald-100 text-emerald-800">Ativo</span>'
+                        : '<span class="px-2 py-0.5 rounded-md text-[11px] font-bold bg-slate-200 text-slate-700">Desativado</span>',
+                    u.mustChangePassword ? '<span class="px-2 py-0.5 rounded-md text-[11px] font-bold bg-amber-100 text-amber-900">Senha temporária</span>' : '',
+                    u.locked ? '<span class="px-2 py-0.5 rounded-md text-[11px] font-bold bg-red-100 text-red-800">Bloqueado</span>' : '',
+                    isMe ? '<span class="px-2 py-0.5 rounded-md text-[11px] font-bold bg-sky-100 text-sky-800">Você</span>' : ''
+                ].join(' ');
+
+                return `
+                <div class="rounded-xl border border-slate-200 p-3 flex flex-col md:flex-row md:items-center gap-3 ${u.active ? 'bg-white' : 'bg-slate-50'}" data-user-id="${u.id}">
+                    <div class="flex-1 min-w-0">
+                        <p class="text-sm font-bold text-slate-900 truncate">${escapeHtml(u.displayName)} <span class="font-medium text-slate-600">@${escapeHtml(u.username)}</span></p>
+                        <div class="mt-1 flex flex-wrap items-center gap-1.5">${statusBadges}</div>
+                        <p class="mt-1 text-xs text-slate-600">Último acesso: ${escapeHtml(formatDateTimeBR(u.lastLoginAt))}</p>
+                    </div>
+                    <div class="flex flex-wrap items-center gap-2">
+                        <label class="sr-only" for="role-${u.id}">Perfil de ${escapeHtml(u.username)}</label>
+                        <select id="role-${u.id}" data-user-action="role" ${isMe ? 'disabled title="Você não pode alterar o próprio perfil"' : ''}
+                                class="text-xs font-semibold bg-white border border-slate-300 rounded-lg px-2.5 py-1.5 disabled:opacity-60">
+                            <option value="operador" ${u.role === 'operador' ? 'selected' : ''}>Operador</option>
+                            <option value="admin" ${u.role === 'admin' ? 'selected' : ''}>Administrador</option>
+                        </select>
+                        <button type="button" data-user-action="reset" ${isMe ? 'disabled' : ''}
+                                class="px-2.5 py-1.5 rounded-lg text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-800 disabled:opacity-50">Redefinir senha</button>
+                        <button type="button" data-user-action="toggle" ${isMe ? 'disabled' : ''}
+                                class="px-2.5 py-1.5 rounded-lg text-xs font-bold disabled:opacity-50 ${u.active ? 'bg-rose-50 hover:bg-rose-100 text-rose-700' : 'bg-emerald-50 hover:bg-emerald-100 text-emerald-800'}">
+                            ${u.active ? 'Desativar' : 'Reativar'}
+                        </button>
+                    </div>
+                </div>`;
+            }).join('');
+        }
+
+        function showTempPassword(username, tempPassword) {
+            document.getElementById('users-temp-username').textContent = '@' + username;
+            document.getElementById('users-temp-value').textContent = tempPassword;
+            const box = document.getElementById('users-temp-password');
+            box.classList.remove('hidden');
+            box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
+
+        async function copyTempPassword() {
+            const value = document.getElementById('users-temp-value').textContent;
+            try {
+                await navigator.clipboard.writeText(value);
+                showToast('Senha copiada!');
+            } catch (_) {
+                showToast('Não foi possível copiar. Selecione e copie manualmente.', 'info');
+            }
+        }
+
+        async function saveNewUserForm(e) {
+            e.preventDefault();
+            const displayName = document.getElementById('nu-name').value.trim();
+            const username = document.getElementById('nu-username').value.trim().toLowerCase();
+            const role = document.getElementById('nu-role').value;
+
+            if (displayName.length < 2) return setFormError('nu-error', 'Informe o nome completo.');
+            if (!/^[a-z0-9._-]{3,32}$/.test(username)) {
+                return setFormError('nu-error', 'Usuário inválido: use de 3 a 32 letras minúsculas, números, ponto, hífen ou sublinhado.');
+            }
+
+            setFormError('nu-error', '');
+            setButtonBusy('nu-submit', true, 'Criando...');
+            try {
+                const json = await apiFetch('create_user', { method: 'POST', body: { displayName, username, role } });
+                document.getElementById('nu-name').value = '';
+                document.getElementById('nu-username').value = '';
+                document.getElementById('nu-role').value = 'operador';
+                showTempPassword(json.username, json.tempPassword);
+                showToast(`Usuário @${json.username} criado!`);
+                await loadUsers();
+            } catch (err) {
+                if (err.status !== 401) setFormError('nu-error', err.message);
+            } finally {
+                setButtonBusy('nu-submit', false);
+            }
+        }
+
+        async function updateUser(id, changes, successMsg) {
+            try {
+                await apiFetch('update_user', { method: 'POST', body: { id, ...changes } });
+                showToast(successMsg);
+            } catch (err) {
+                if (err.status !== 401) showToast(err.message, 'error');
+            }
+            await loadUsers();
+        }
+
+        // Delegação de eventos na lista de usuários (sem onclick com dados interpolados)
+        document.getElementById('users-list').addEventListener('change', (ev) => {
+            const select = ev.target.closest('[data-user-action="role"]');
+            if (!select) return;
+            const id = Number(select.closest('[data-user-id]').dataset.userId);
+            const u = usersCache.find(x => x.id === id);
+            if (!u) return;
+            updateUser(id, { role: select.value }, `Perfil de @${u.username} alterado para ${ROLE_LABELS[select.value]}.`);
+        });
+
+        document.getElementById('users-list').addEventListener('click', (ev) => {
+            const btn = ev.target.closest('button[data-user-action]');
+            if (!btn || btn.disabled) return;
+            const id = Number(btn.closest('[data-user-id]').dataset.userId);
+            const u = usersCache.find(x => x.id === id);
+            if (!u) return;
+
+            if (btn.dataset.userAction === 'toggle') {
+                const deactivate = u.active;
+                const run = () => updateUser(id, { active: !u.active }, deactivate ? `@${u.username} foi desativado.` : `@${u.username} foi reativado.`);
+                if (deactivate) {
+                    closeModal('modal-users');
+                    openConfirmDialog('Desativar usuário', `@${u.username} perderá o acesso ao sistema imediatamente. O histórico dele é mantido. Continuar?`, async () => {
+                        openModal('modal-users');
+                        await run();
+                    });
+                } else {
+                    run();
+                }
+            }
+
+            if (btn.dataset.userAction === 'reset') {
+                closeModal('modal-users');
+                openConfirmDialog('Redefinir senha', `Gerar uma nova senha temporária para @${u.username}? A senha atual deixará de funcionar.`, async () => {
+                    openModal('modal-users');
+                    try {
+                        const json = await apiFetch('reset_password', { method: 'POST', body: { id } });
+                        showTempPassword(json.username, json.tempPassword);
+                        showToast(`Senha de @${json.username} redefinida.`);
+                    } catch (err) {
+                        if (err.status !== 401) showToast(err.message, 'error');
+                    }
+                    await loadUsers();
+                });
+            }
+        });
+
         Object.assign(window, {
+            toggleUserMenu,
+            openChangePasswordModal,
+            saveChangePasswordForm,
+            openUsersModal,
+            saveNewUserForm,
+            copyTempPassword,
             switchTab,
             jumpToMapSlot,
             openModal,
@@ -3851,6 +4365,7 @@
         });
 
         window.onload = function () {
+            renderUserHeader();
             initDatabase();
         };
     </script>
